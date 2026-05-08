@@ -1,0 +1,7 @@
+result
+result-*
+.qubix/
+*.vhd
+*.vhdx
+*.qcow2
+*.iso
