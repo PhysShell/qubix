@@ -253,7 +253,6 @@ JSON to YAML with a tool such as `yj`.
 
 ## TODO / Later Goals
 
-- Spotify Openbox autostart.
 - Spotify network lockdown via nftables, proxy or DNS allowlist.
 - Stable custom Hyper-V NAT switch.
 - PipeWire + EasyEffects experiment once xrdp audio is understood.

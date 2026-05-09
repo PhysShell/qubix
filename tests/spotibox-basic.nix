@@ -21,5 +21,7 @@ pkgs.testers.nixosTest {
     machine.succeed("command -v pavucontrol")
     machine.succeed("systemctl is-enabled xrdp")
     machine.succeed("systemctl is-enabled avahi-daemon")
+    machine.succeed("test -f /etc/xdg/openbox/autostart")
+    machine.succeed("grep -q spotify /etc/xdg/openbox/autostart")
   '';
 }

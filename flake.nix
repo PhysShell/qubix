@@ -89,6 +89,29 @@
       qubix-manifest-json = pkgs.writeText "qubix-manifest.json"
         (builtins.toJSON qubixManifest);
 
+      # Inspection helper: prints the spotibox system closure size and the top
+      # 30 contributors, sorted by recursive closure size descending. Intended
+      # for sizing decisions — building it forces the spotibox toplevel, since
+      # there is nothing to measure otherwise.
+      qubix-closure-info = pkgs.writeShellApplication {
+        name = "qubix-closure-info";
+        runtimeInputs = with pkgs; [ nix coreutils ];
+        text = ''
+          toplevel="${spotiboxCfg.system.build.toplevel}"
+
+          echo "Spotibox system toplevel:"
+          echo "  $toplevel"
+          echo
+
+          echo "Total closure size:"
+          nix path-info -Sh "$toplevel"
+          echo
+
+          echo "Top 30 closure contributors (closure size, descending):"
+          nix path-info -rSh "$toplevel" | sort -hrk2 | head -n 30
+        '';
+      };
+
       default = self.packages.${system}.spotibox-vhdx;
     };
 
