@@ -24,7 +24,9 @@ lib.mkIf (config.qubix.audio == "pulseaudio-xrdp") {
   # This must be an overlay, not services.xrdp.package: the NixOS xrdp module
   # declares that option but hardcodes pkgs.xrdp in the ExecStart lines of both
   # xrdp.service and xrdp-sesman.service, so setting the option rebuilds only
-  # confDir while the daemons keep running the unmodified build.
+  # confDir while the daemons keep running the unmodified build.  A fix is
+  # already open upstream as https://github.com/NixOS/nixpkgs/pull/452303;
+  # once it lands this can go back to a plain services.xrdp.package assignment.
   nixpkgs.overlays = [
     (_final: prev: {
       xrdp = prev.xrdp.overrideAttrs (old: {

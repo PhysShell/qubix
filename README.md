@@ -351,7 +351,9 @@ The override has to be a `nixpkgs.overlays` entry rather than the obvious
 `services.xrdp.package`. The NixOS module declares that option but then
 hardcodes `pkgs.xrdp` in the `ExecStart` of both `xrdp.service` and
 `xrdp-sesman.service`, so setting it rebuilds `confDir` only and the daemons
-keep running the untouched build - the option silently does nothing.
+keep running the untouched build - the option silently does nothing. A fix is open
+upstream as [nixpkgs#452303](https://github.com/NixOS/nixpkgs/pull/452303); when it
+lands, this overlay can become a plain `services.xrdp.package` assignment.
 
 ### Nix-Generated JSON
 
