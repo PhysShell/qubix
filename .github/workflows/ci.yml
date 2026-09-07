@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  nix:
+    name: flake check, manifest sync, home seed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: nix flake check
+        run: nix flake check --no-build -L
+
+      - name: manifest.json matches Nix
+        run: |
+          nix build .#qubix-manifest-json --out-link manifest.generated
+          if ! diff -u manifest.json manifest.generated; then
+            echo "::error::manifest.json is stale. Run tools/update-manifest.sh and commit the result."
+            exit 1
+          fi
+
+      - name: home seed image builds
+        run: nix build .#spotibox-home-vhdx -L --no-link
+
+  powershell:
+    name: controller lint + unit checks (${{ matrix.shell }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows PowerShell 5.1 is what qubix-up.cmd runs; pwsh is the
+        # developer console.  Both must stay happy.
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: PSScriptAnalyzer
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          $results = Invoke-ScriptAnalyzer -Path tools -Recurse -Settings ./PSScriptAnalyzerSettings.psd1
+          $results | Format-Table -AutoSize | Out-String | Write-Host
+          if ($results.Count -gt 0) { exit 1 }
+
+      - name: unit checks
+        shell: ${{ matrix.shell }}
+        run: |
+          & ./tests/qubixctl.Tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

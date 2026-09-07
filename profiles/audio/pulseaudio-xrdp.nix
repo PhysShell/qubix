@@ -7,15 +7,10 @@ lib.mkIf (config.qubix.audio == "pulseaudio-xrdp") {
   # PipeWire was deliberately not selected for this baseline because the
   # Hyper-V + xrdp appliance prototype produced Dummy Output / broken audio with
   # PipeWire while PulseAudio+xrdp worked.
-  services.xrdp = {
-    enable = true;
-    defaultWindowManager = "openbox-session";
-    openFirewall = true;
-
-    audio = {
-      enable = true;
-    };
-  };
+  #
+  # The xrdp server itself is configured in profiles/remote/xrdp.nix; this
+  # profile only wires the audio path into it.
+  services.xrdp.audio.enable = true;
 
   security.rtkit.enable = true;
 

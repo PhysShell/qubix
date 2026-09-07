@@ -14,144 +14,270 @@ Name `Qubix` is a Qubes OS + Nix which is so obvious but fancy that I couldn't r
 
 
 Qubix is a small declarative appliance factory for Windows-hosted, Hyper-V-based
-NixOS VMs. The MVP builds one appliance, `spotibox`, as a minimal Spotify VM with
-Openbox, xrdp and the PulseAudio audio path that worked in the prototype.
+NixOS VMs. The first appliance, `spotibox`, is a minimal Spotify VM with Openbox,
+xrdp and the PulseAudio audio path that worked in the prototype.
 
-
-The goal is a fast local loop:
+The loop, from the Windows side, is one click:
 
 ```text
-Nix modules
-  -> nixos-generators Hyper-V VHDX
-  -> PowerShell recreates the Hyper-V VM
-  -> mstsc connects to the appliance
+machines/*.nix + profiles/*.nix          (source of truth, Nix)
+  -> GitHub Actions builds the Hyper-V VHDX + home-disk seed
+  -> tools\qubix-up.cmd downloads them, creates the VM once, starts it
+  -> mstsc opens with Spotify filling the window
 ```
 
-## What The MVP Gives You
+WSL is not required on the host. It stays available as the developer loop
+(`-ImageSource wsl`) for building images locally.
+
+## What You Get
 
 - A modular NixOS configuration for `spotibox`.
 - A Hyper-V Generation 2 VHDX built through `nixos-generators`.
-- A Nix-generated JSON manifest consumed by PowerShell.
-- A Windows PowerShell controller, `tools/qubixctl.ps1`.
+- A **persistent home disk**: `/home` lives on its own VHDX, so replacing the
+  system image never logs you out of Spotify.
+- A Spotify kiosk session: xrdp starts Openbox + Spotify, the Spotify window is
+  undecorated and maximised, quitting Spotify closes the RDP window.
+- A Nix-generated JSON manifest (`manifest.json`, committed, CI-checked)
+  consumed by the Windows controller without WSL.
+- `tools/qubixctl.ps1`, an idempotent controller (`up` is the default), and
+  `tools/qubix-up.cmd`, the double-click launcher that elevates itself.
+- GitHub Actions: `ci` (flake check, manifest drift, PowerShell lint + unit
+  checks) and `release` (builds and attaches the images to a tagged release).
 - A stable xrdp audio baseline using PulseAudio, not PipeWire.
-- Separate `user` and `rdp` accounts to avoid session cross-contamination.
-- A basic NixOS smoke test for users, xrdp, Spotify, Openbox and Avahi.
+- Separate `user` and `rdp` accounts (pinned UIDs) to avoid session
+  cross-contamination.
+- A NixOS smoke test for users, xrdp, Spotify, Openbox, Avahi and the kiosk
+  session wiring.
 
-## Layout
+## Quick Start (Windows, No WSL)
+
+Once: enable Hyper-V from an elevated PowerShell and reboot.
+
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All
+```
+
+Then clone the repository to a normal Windows path and double-click
+`tools\qubix-up.cmd`. It asks for elevation and runs `qubixctl -Command up`:
+
+1. reads `manifest.json`;
+2. resolves the latest GitHub release, downloads `spotibox.vhdx.gz`,
+   `spotibox-home.vhdx.gz` and `SHA256SUMS` into `C:\HyperV\Qubix\images\`,
+   verifies and unpacks them (cached per release tag);
+3. creates `qubix-spotibox` on first run only: system disk from the image,
+   home disk seeded once, NAT switch `spotibox-nat` with a static address;
+4. starts the VM, waits for port 3389, writes `qubix-spotibox.rdp`, stores the
+   lab credential in Windows Credential Manager and launches `mstsc`.
+
+Every later click is the same command: the VM already exists, so it just
+starts (or resumes) and opens the window. Spotify comes up maximised inside it.
+
+From a console the same thing is:
+
+```powershell
+.\tools\qubixctl.cmd                       # up spotibox
+.\tools\qubixctl.cmd -Command status
+.\tools\qubixctl.cmd -Command stop
+```
+
+### Commands
+
+| Command    | What it does                                                                 |
+|------------|------------------------------------------------------------------------------|
+| `up`       | create-if-missing, start, wait for RDP, connect (default)                    |
+| `connect`  | open the RDP window for a running VM                                         |
+| `start`    | start / resume the VM                                                        |
+| `stop`     | graceful shutdown                                                            |
+| `status`   | VM state, adapters, disks, address, installed image version, cached images   |
+| `recreate` | replace the system disk with fresh images; **the home disk is kept**         |
+| `destroy`  | remove VM + system disk; `-Purge` also deletes the home disk                 |
+| `fetch`    | download release images into the cache without touching the VM              |
+| `build`    | build images in WSL (developer path)                                         |
+| `manifest` | print the resolved machine config                                            |
+
+Useful switches: `-Release v0.2.0` (pin a release), `-VmRoot D:\vms`,
+`-SwitchName`, `-Address 192.168.250.10`, `-NoConnect`, `-NoSavedCredential`,
+`-TimeoutSeconds 600`.
+
+### Where Images Come From
+
+| `-ImageSource` | Source                                                                | Needs      |
+|----------------|-----------------------------------------------------------------------|------------|
+| `auto`         | `-ImagePath` if given, otherwise `release` (default)                  |            |
+| `release`      | GitHub release assets of `PhysShell/qubix` (`latest` or `-Release`)   | internet   |
+| `wsl`          | `nix build` inside WSL; manifest regenerated from Nix on the fly      | WSL + Nix  |
+| `file`         | `-ImagePath <x.vhdx|.gz>` plus `-HomeImagePath` for a first-time home | files      |
+
+Release downloads use plain `https://github.com/<repo>/releases/...` URLs, so a
+public repository needs no token. Private repositories are not supported by the
+`release` source yet; use `fetch` from a machine that can reach the assets, or
+the `wsl` / `file` sources.
+
+## Persistence Model
 
 ```text
-flake.nix
-machines/
-  spotibox.nix
-  spotibox-debug.nix
-profiles/
-  audio/pulseaudio-xrdp.nix
-  apps/spotify.nix
-  gui/openbox.nix
-  kernel/default.nix
-  modes/debug.nix
-  modes/prod.nix
-  security/minimal.nix
-tools/
-  qubixctl.ps1
-tests/
-  spotibox-basic.nix
+C:\HyperV\Qubix\
+  images\spotibox\<tag>\        unpacked release assets (cache, safe to delete)
+  qubix-spotibox\
+    qubix-spotibox.vhdx         SYSTEM disk  = Nix artifact, replaced by recreate
+    qubix-spotibox-home.vhdx    HOME disk    = the only state, never replaced
+    qubix-spotibox.rdp          generated connection file
+    image-version.txt           release tag / build id of the system disk
 ```
 
-## Build The Image
+- The system disk is rebuilt from Nix; nothing on it is worth keeping.
+- `/home` is mounted from the disk labelled `qubix-home` and is required for
+  boot (`profiles/storage/persistent-home.nix`). A missing home disk stops the
+  boot loudly instead of silently handing you an empty home.
+- `recreate` deletes only the system disk. Spotify stays logged in.
+- Hyper-V checkpoints are disabled on the VM: they would fork the home disk
+  into `.avhdx` chains the controller cannot reason about.
+- User IDs are pinned (`user` = 1000, `rdp` = 1001) so a persistent home never
+  changes owner when the user list changes.
 
-From Linux/WSL:
+## Publishing A Release
 
 ```bash
-nix build .#spotibox-vhdx
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-The default package is also `spotibox-vhdx`, so this works too:
+The `release` workflow builds `.#spotibox-release` on GitHub Actions (KVM is
+enabled on the runner so `make-disk-image` does not crawl through emulation),
+checks every asset against the 2 GB GitHub limit and attaches:
+
+```text
+spotibox.vhdx.gz        system image (gzip, unpacked on Windows with .NET only)
+spotibox-home.vhdx.gz   16 GiB dynamic ext4 seed, a few hundred KB compressed
+manifest.json           the manifest the images were built with
+SHA256SUMS
+VERSION                 tag + commit
+```
+
+`workflow_dispatch` with an existing tag rebuilds and re-attaches the assets.
+
+## Developer Loop (WSL)
+
+From Linux/WSL, the usual Nix commands still work:
 
 ```bash
-nix build
+nix build .#spotibox-vhdx          # or just `nix build`
+nix build .#spotibox-home-vhdx
+nix build .#spotibox-release       # what CI publishes
+nix flake check --no-build
 ```
 
-The generated manifest is available as a build artifact:
+Whenever `machines/*.nix` or the manifest logic changes, regenerate the
+committed manifest (CI fails on drift):
 
 ```bash
-nix build .#qubix-manifest-json
-cat result
+tools/update-manifest.sh
 ```
 
-`result` is a symlink to the JSON file in the Nix store.  The PowerShell
-controller builds and reads the same artifact at runtime — you do not need to
-build it manually.
-
-## Recreate The Hyper-V VM
-
-Run PowerShell from Windows. Mutating Hyper-V commands must be run from an
-elevated PowerShell session.
+To test a local build on the Windows side without publishing a release:
 
 ```powershell
-Set-Location $HOME
+# repo lives in WSL:   assign the UNC path, do not cd into it
 $Qubix = "\\wsl.localhost\NixOS\home\nixos\Documents\repos\qubix"
-
-& "$Qubix\tools\qubixctl.cmd" -Command recreate -Machine spotibox
+& "$Qubix\tools\qubixctl.cmd" -Command recreate -ImageSource wsl
 ```
 
-`recreate` builds the Nix image and recreates the VM in one step.
+With `-ImageSource wsl` the controller derives the distro and Linux path from
+the UNC path (override with `-WslDistro` / `-RepoLinuxPath`), regenerates the
+manifest from Nix, builds both images and copies them out of the store.
 
-The `.cmd` wrapper runs the PowerShell script with process-scoped
-`-ExecutionPolicy Bypass`. This avoids changing your global execution policy and
-works around Windows treating scripts under `\\wsl.localhost\...` as unsigned
-remote files. Keep the PowerShell working directory on a normal Windows path
-when invoking the wrapper: `cmd.exe` cannot use a UNC path as its current
-directory and otherwise falls back to `C:\Windows`. In other words, assign the
-UNC path to `$Qubix`, but do not `cd` into it.
+The `.cmd` wrappers run PowerShell with a process-scoped
+`-ExecutionPolicy Bypass`, which also sidesteps Windows treating scripts under
+`\\wsl.localhost\...` as unsigned remote files. `cmd.exe` cannot use a UNC path
+as its working directory, so the wrappers `pushd` to a temporary drive letter.
 
-The controller defaults to:
+## Networking
 
-- WSL distro: `NixOS`
-- Linux repo path: `/home/nixos/Documents/repos/qubix`
-- Hyper-V switch: `Default Switch`
-- VM name: `qubix-spotibox`
-- VM root: `C:\HyperV\Qubix`
+`machines/spotibox.nix` declares a static address:
 
-Override them when needed:
-
-```powershell
-& "$Qubix\tools\qubixctl.cmd" `
-  -Command recreate `
-  -Machine spotibox `
-  -WslDistro NixOS `
-  -RepoLinuxPath /home/nixos/Documents/repos/qubix `
-  -VmRoot C:\HyperV\Qubix `
-  -SwitchName "Default Switch"
+```nix
+qubix.network = {
+  staticIp = "192.168.250.10";
+  gateway  = "192.168.250.1";
+};
 ```
 
-Other commands:
+The manifest derives `gatewayIp` and `natSwitchSubnet` from it, and `qubixctl`
+creates an Internal Hyper-V switch `spotibox-nat`, assigns the gateway address
+to the host `vEthernet` adapter and adds a `NetNat` rule. All three steps are
+idempotent. Because the image and the manifest come from the same machine file,
+they cannot disagree about the address.
 
-```powershell
-& "$Qubix\tools\qubixctl.cmd" -Command build    # run nix build only, skip VM
-& "$Qubix\tools\qubixctl.cmd" -Command status
-& "$Qubix\tools\qubixctl.cmd" -Command start
-& "$Qubix\tools\qubixctl.cmd" -Command stop
-& "$Qubix\tools\qubixctl.cmd" -Command destroy
-& "$Qubix\tools\qubixctl.cmd" -Command mstsc
+Remove `qubix.network.staticIp` (set it to `null`) to fall back to DHCP on
+`Default Switch`. The controller then asks Hyper-V for the address the guest
+reported (`hv_kvp_daemon`) and falls back to `spotibox.local` via Avahi/mDNS.
+
+Windows allows a single `NetNat` instance per host. If another NAT network
+already exists (Docker, a lab switch), reuse it or switch spotibox to DHCP.
+
+## Validation
+
+```bash
+nix flake check --no-build                                   # evaluates every system and the test
+nix build .#checks.x86_64-linux.spotibox-basic               # boots the appliance in QEMU
+pwsh ./tests/qubixctl.Tests.ps1                              # controller unit checks
 ```
 
-`mstsc` defaults to `spotibox.local`. If name resolution fails, pass an address:
+Manual acceptance on Windows:
 
-```powershell
-& "$Qubix\tools\qubixctl.cmd" -Command mstsc -Address 192.168.192.121
-```
+1. Double-click `tools\qubix-up.cmd`; Hyper-V shows `qubix-spotibox` running.
+2. The RDP window opens as `rdp` with Spotify maximised and undecorated.
+3. Audio plays through the host; `pavucontrol` (via an `xterm` from the Hyper-V
+   console, user `user`) shows the xrdp sink.
+4. Log into Spotify, run `qubixctl -Command recreate`, click again: still
+   logged in.
+5. Quit Spotify: the RDP window closes.
 
-## Why VHDX Instead Of ISO Autoinstall
+## Design Notes
+
+### Why not run Spotify from WSL instead?
+
+WSLg would give a real native window with audio for free, but WSL is not an
+isolation boundary: every distro shares one utility VM, and interop, automount
+and the Windows PATH are on by default. Turning those off per distro reduces
+exposure; it does not turn WSL into a VM. Since isolation is the whole point,
+the appliance stays a Hyper-V VM and the "native window" is approximated by a
+kiosk session in a windowed RDP client.
+
+### Why not App Sandbox / HCS?
+
+[App Sandbox](https://github.com/jamesstringer90/appsandbox) (the successor of
+the archived Easy-GPU-PV) is the interesting future backend: HCS-based VMs
+without the Hyper-V role, GPU-PV, snapshots, a headless API. Today it documents
+Windows 11 and Ubuntu guests built from ISO, not arbitrary images such as a
+NixOS VHDX, its storage path is not configurable and the daemon owns the VM
+lifecycle. Nothing in it helps a Spotify appliance that Hyper-V already runs.
+The manifest is deliberately backend-neutral (`gpu`, `network`, disks) so a
+second backend can be added without touching the Nix side.
+
+### Why not Ansible for Windows?
+
+Ansible needs a Linux control node, which on this host means WSL, the very
+dependency this change removes from the runtime path. The Windows-side work
+here is a few Hyper-V cmdlets; a 20 KB PowerShell script with unit checks is
+the right size for it.
+
+### Why no GPU-PV?
+
+Spotify does not need it, and GPU-PV for a Linux guest on Hyper-V means the
+out-of-tree `dxgkrnl` module plus host driver files in the guest, a rabbit hole
+with a Windows-update-shaped trapdoor. Off by design for this appliance.
+
+### Why VHDX Instead Of ISO Autoinstall
 
 The old prototype used an ISO that booted, partitioned `/dev/sda`, installed
 NixOS and rebooted. That works, but it keeps the slowest and most fragile part of
 the loop: installing an OS inside a VM every time.
 
-Qubix MVP builds the final Hyper-V VHDX directly from Nix. Hyper-V then only has
+Qubix builds the final Hyper-V VHDX directly from Nix. Hyper-V then only has
 to boot a ready disk.
 
-## Why PulseAudio+xrdp
+### Why PulseAudio+xrdp
 
 The prototype found a very specific failure mode: Hyper-V enhanced sessions and
 mstsc sessions under the same Unix user can mix `DISPLAY`,
@@ -170,98 +296,55 @@ PipeWire       -> disabled
 EasyEffects is intentionally not the active DSP baseline here. It is
 PipeWire-oriented, while this xrdp audio path expects PulseAudio.
 
-## Connecting To The Appliance
+### Nix-Generated JSON
 
-### Default: mDNS (recommended for most cases)
+Nix is the source of truth for the manifest. `manifest.json` is the output of
+`nix build .#qubix-manifest-json`, committed so that a Windows host without WSL
+can read it, and checked for drift by CI. With `-ImageSource wsl` the
+controller regenerates it live instead of reading the file.
 
-The default manifest uses Hyper-V `Default Switch` with DHCP.  The IP address
-may change after reboot, but Avahi mDNS lets you connect by name:
+## Layout
 
-```powershell
-.\tools\qubixctl.cmd -Command mstsc   # resolves spotibox.local
+```text
+flake.nix                  packages, manifest, home seed, release bundle
+manifest.json              generated by tools/update-manifest.sh, CI-checked
+machines/
+  spotibox.nix
+  spotibox-debug.nix
+modules/qubix-options.nix  qubix.* options (mode, gui, audio, app, session, homeDisk, network)
+profiles/
+  apps/spotify.nix         Spotify package, kiosk rc.xml, spotibox-session
+  audio/pulseaudio-xrdp.nix
+  gui/openbox.nix
+  kernel/default.nix
+  modes/debug.nix, prod.nix
+  network/default.nix
+  remote/xrdp.nix          xrdp server, session = qubix.session.command
+  security/minimal.nix
+  storage/persistent-home.nix
+tools/
+  qubixctl.ps1             controller
+  qubixctl.cmd             console wrapper
+  qubix-up.cmd             double-click launcher (elevates, runs `up`)
+  update-manifest.sh
+tests/
+  spotibox-basic.nix       NixOS VM test
+  qubixctl.Tests.ps1       controller unit checks
+.github/workflows/
+  ci.yml, release.yml
 ```
-
-If `spotibox.local` does not resolve, use `status` or Hyper-V Manager to find the
-current IP and pass it with `-Address`.
-
-### Optional: Static IP with a Dedicated NAT Switch
-
-For a stable address that survives reboots, declare a static IP in both the
-NixOS machine config and the flake manifest.
-
-Edit **`machines/spotibox.nix`** only — the manifest derives the values automatically:
-
-```nix
-qubix.network = {
-  staticIp = "192.168.250.10";
-  gateway  = "192.168.250.1";
-};
-```
-
-Then **recreate** as usual:
-
-```powershell
-.\tools\qubixctl.cmd -Command recreate -Machine spotibox
-```
-
-`qubixctl` automatically creates an Internal Hyper-V switch (`spotibox-nat`),
-assigns the gateway IP to the host vEthernet adapter, and creates a `NetNat`
-rule so the VM can reach the internet.  All three steps are idempotent — safe
-to re-run on every recreate.
-
-Connect by fixed IP:
-
-```powershell
-.\tools\qubixctl.cmd -Command mstsc -Address 192.168.250.10
-```
-
-> **Note:** the NixOS image and the manifest must declare the same address.
-> Qubix does not enforce this automatically — if they diverge the VM will boot
-> with the wrong IP for the switch it is attached to.
-
-## Validation
-
-Evaluate the flake:
-
-```bash
-nix flake check --no-build
-```
-
-Run the full smoke test when you are ready to build test VMs:
-
-```bash
-nix build .#checks.x86_64-linux.spotibox-basic
-```
-
-Manual acceptance:
-
-1. `.\tools\qubixctl.cmd -Command recreate -Machine spotibox`
-2. Confirm Hyper-V has a running `qubix-spotibox`.
-3. Connect with mstsc as `rdp` / `1234`.
-4. Start `pavucontrol` in the RDP session and confirm the window appears there.
-5. Start Spotify manually and confirm audio routes through RDP.
-
-## Nix-Generated JSON And Future YAML
-
-Nix is the source of truth for the manifest.  `qubixctl` builds the
-`qubix-manifest-json` derivation at startup, reads the resulting store path,
-and parses the JSON — no manually maintained config file.
-
-YAML can be generated later as a human-facing artifact using the same pattern:
-describe structured data in Nix, emit JSON with `builtins.toJSON`, then convert
-JSON to YAML with a tool such as `yj`.
 
 ## TODO / Later Goals
 
-- Spotify Openbox autostart.
 - Spotify network lockdown via nftables, proxy or DNS allowlist.
-- Stable custom Hyper-V NAT switch.
 - PipeWire + EasyEffects experiment once xrdp audio is understood.
 - Hardening profile, possibly inspired by nix-mineral, applied carefully.
-- Production image with fewer debug tools.
+- Production image with fewer debug tools (drop `xterm` from prod).
 - Kernel profile experiments: default/latest/hardened first, custom tiny kernel later.
 - Hyper-V differencing disks for disposable runtime clones.
-- Optional Nix-generated YAML artifact for human-facing config/docs.
+- Private-repository release downloads (token-authenticated asset URLs).
+- Second backend behind the same manifest (App Sandbox / HCS) once it accepts
+  custom images and a configurable storage path.
 - `backend.microvm` for headless disposable sandboxes.
 - `backend.nspawn` for trusted services.
 
@@ -269,3 +352,4 @@ JSON to YAML with a tool such as `yj`.
 
 - nixos-generators: <https://github.com/nix-community/nixos-generators>
 - Generating YAML files with Nix: <https://kokada.dev/blog/generating-yaml-files-with-nix/>
+- App Sandbox: <https://github.com/jamesstringer90/appsandbox>
