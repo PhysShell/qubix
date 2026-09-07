@@ -1,6 +1,7 @@
 result
 result-*
 .qubix/
+manifest.generated
 *.vhd
 *.vhdx
 *.qcow2

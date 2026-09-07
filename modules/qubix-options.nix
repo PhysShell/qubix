@@ -38,6 +38,45 @@
       description = "Disposable lab password used for generated appliance users.";
     };
 
+    session.command = lib.mkOption {
+      type = lib.types.str;
+      default = "xterm";
+      example = "openbox-session";
+      description = ''
+        Command that starts the graphical session for remote (xrdp) logins.
+        GUI profiles set a window-manager default; app profiles override it
+        with a purpose-built session (for example Spotify in kiosk mode).
+      '';
+    };
+
+    homeDisk = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Mount /home from a separate, persistent VHDX labelled
+          `qubix.homeDisk.label`.  The system disk is a throwaway Nix
+          artifact that gets replaced on every recreate; the home disk is
+          what survives — Spotify login, caches, user settings.
+        '';
+      };
+
+      label = lib.mkOption {
+        type = lib.types.str;
+        default = "qubix-home";
+        description = "ext4 filesystem label of the persistent home disk.";
+      };
+
+      sizeMiB = lib.mkOption {
+        type = lib.types.int;
+        default = 16 * 1024;
+        description = ''
+          Size of the generated home-disk seed image.  The VHDX is dynamic,
+          so only used space is consumed on the host.
+        '';
+      };
+    };
+
     networkLockdown.enable = lib.mkEnableOption "restricted outbound network policy";
 
     network = {

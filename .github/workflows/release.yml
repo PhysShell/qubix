@@ -1,0 +1,73 @@
+name: release
+
+# Builds the Hyper-V images with Nix and attaches them to the GitHub release
+# for the tag.  Windows hosts then need nothing but Hyper-V and PowerShell:
+# `qubixctl -Command up` downloads these assets, no WSL involved.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)build and publish'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build and publish images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Enable KVM for the Nix build sandbox
+        # make-disk-image builds the VHDX inside a QEMU VM; without KVM it
+        # would crawl through TCG emulation.
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            system-features = nixos-test benchmark big-parallel kvm
+
+      - name: Build release bundle
+        run: nix build .#spotibox-release -L --out-link release
+
+      - name: Inspect assets
+        run: |
+          ls -la release/
+          cat release/SHA256SUMS
+          for f in release/*.gz; do
+            size=$(stat -L -c %s "$f")
+            if [ "$size" -ge 2000000000 ]; then
+              echo "::error::$f is $size bytes, above the 2 GB GitHub release asset limit"
+              exit 1
+            fi
+          done
+
+      - name: Version stamp
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          printf 'tag=%s\nrev=%s\n' "$tag" "$(git rev-parse HEAD)" > VERSION
+          cat VERSION
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            release/*
+            VERSION

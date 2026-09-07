@@ -8,6 +8,9 @@ lib.mkIf (config.qubix.gui == "openbox") {
   services.xserver.displayManager.lightdm.enable = true;
   services.xserver.windowManager.openbox.enable = true;
 
+  # Remote sessions get a bare Openbox unless an app profile overrides this.
+  qubix.session.command = lib.mkDefault "${pkgs.openbox}/bin/openbox-session";
+
   environment.systemPackages = with pkgs; [
     openbox
     xterm

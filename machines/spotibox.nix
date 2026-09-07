@@ -4,6 +4,8 @@
   imports = [
     ../profiles/base.nix
     ../profiles/users.nix
+    ../profiles/storage/persistent-home.nix
+    ../profiles/remote/xrdp.nix
     ../profiles/gui/openbox.nix
     ../profiles/audio/pulseaudio-xrdp.nix
     ../profiles/apps/spotify.nix
@@ -24,6 +26,7 @@
     audio = "pulseaudio-xrdp";
     app = "spotify";
     kernel = "default";
+    homeDisk.sizeMiB = 16 * 1024;
     network = { staticIp = "192.168.250.10"; gateway = "192.168.250.1"; };
   };
 }
