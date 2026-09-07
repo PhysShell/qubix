@@ -43,7 +43,9 @@ WSL is not required on the host. It stays available as the developer loop
   `tools/qubix-up.cmd`, the double-click launcher that elevates itself.
 - GitHub Actions: `ci` (flake check, manifest drift, PowerShell lint + unit
   checks) and `release` (builds and attaches the images to a tagged release).
-- A stable xrdp audio baseline using PulseAudio, not PipeWire.
+- A stable xrdp audio baseline using PulseAudio, not PipeWire, and xrdp built
+  without the MP3/Opus encoders so that mstsc negotiates PCM and actually
+  plays it (see *Why PCM-only audio*).
 - Separate `user` and `rdp` accounts (pinned UIDs) to avoid session
   cross-contamination.
 - A NixOS smoke test for users, xrdp, Spotify, Openbox, Avahi and the kiosk
@@ -134,6 +136,40 @@ C:\HyperV\Qubix\
   into `.avhdx` chains the controller cannot reason about.
 - User IDs are pinned (`user` = 1000, `rdp` = 1001) so a persistent home never
   changes owner when the user list changes.
+
+## Continuous Integration
+
+`ci` runs on pull requests, on pushes to `main`, and on manual dispatch. It
+does **not** run on a push to a feature branch, so work on a branch stays
+unchecked until a PR exists - open one early if you want the signal.
+
+| Job | Runner | What it does |
+| --- | --- | --- |
+| `flake check, manifest sync, home seed` | ubuntu | `nix flake check`, fails on `manifest.json` drift, builds the home seed |
+| `controller lint + unit checks (powershell)` | windows | unit checks under Windows PowerShell 5.1, the shell `qubix-up.cmd` actually uses |
+| `controller lint + unit checks (pwsh)` | windows | the same checks under pwsh 7, plus PSScriptAnalyzer |
+
+Driving it from the terminal with the GitHub CLI:
+
+```bash
+gh run list --limit 10                 # recent runs, newest first
+gh run watch                           # follow the run for the current branch
+gh run view <run-id> --log-failed      # only the failing steps
+gh run rerun <run-id> --failed         # retry just the failed jobs
+gh workflow run ci.yml --ref <branch>  # manual dispatch
+gh pr checks <pr>                      # per-check status for a PR
+```
+
+A run that fails in 0s with no jobs, and a workflow listed under its file path
+instead of its `name:`, means GitHub could not compile the YAML - the run log
+is empty in that case, so lint locally instead:
+
+```bash
+nix run nixpkgs#actionlint
+```
+
+`actionlint` catches the whole class of errors GitHub reports only as a failed
+run, such as using a context where none is allowed.
 
 ## Publishing A Release
 
@@ -295,6 +331,27 @@ PipeWire       -> disabled
 
 EasyEffects is intentionally not the active DSP baseline here. It is
 PipeWire-oriented, while this xrdp audio path expects PulseAudio.
+
+### Why PCM-only audio
+
+nixpkgs builds xrdp with `--enable-mp3lame` and `--enable-opus`. With those
+available, Windows' `mstsc` negotiates `WAVE_FORMAT_MPEGLAYER3` and then plays
+nothing at all, while every diagnostic inside the guest looks perfectly
+healthy: `xrdp-sink` is the default sink, it is not muted, it sits at 100%, it
+moves between IDLE and RUNNING in time with the track, chansrv accepts the
+socket and logs `round trip time 0`. Only the host is silent, and the Windows
+volume mixer shows the mstsc slider with no level on it. See
+[neutrinolabs/xrdp#965](https://github.com/neutrinolabs/xrdp/issues/965).
+
+`profiles/audio/pulseaudio-xrdp.nix` therefore drops both encoders, which
+leaves PCM as the only negotiable format. PCM is ~176 kB/s - irrelevant next to
+the video channel.
+
+The override has to be a `nixpkgs.overlays` entry rather than the obvious
+`services.xrdp.package`. The NixOS module declares that option but then
+hardcodes `pkgs.xrdp` in the `ExecStart` of both `xrdp.service` and
+`xrdp-sesman.service`, so setting it rebuilds `confDir` only and the daemons
+keep running the untouched build - the option silently does nothing.
 
 ### Nix-Generated JSON
 
