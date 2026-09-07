@@ -1,0 +1,11 @@
+# Nix embeds the contents of these files verbatim into derivation build
+# scripts.  A CR that survives into such a script reaches bash as a literal
+# $'\r' command and the build dies with exit code 127, so a Windows clone made
+# with the Git default core.autocrlf=true cannot build the images at all.
+# Normalise everything to LF in the working tree, not just in the blobs.
+* text=auto eol=lf
+
+# The CMD entry points are the exception: cmd.exe parses multi-line blocks
+# reliably only with CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf

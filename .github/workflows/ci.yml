@@ -38,6 +38,11 @@ jobs:
         # Windows PowerShell 5.1 is what qubix-up.cmd runs; pwsh is the
         # developer console.  Both must stay happy.
         shell: [powershell, pwsh]
+    defaults:
+      run:
+        # A step's own `shell:` accepts no contexts at all, so the matrix
+        # value has to arrive through the job defaults instead.
+        shell: ${{ matrix.shell }}
     steps:
       - uses: actions/checkout@v4
 
@@ -51,7 +56,6 @@ jobs:
           if ($results.Count -gt 0) { exit 1 }
 
       - name: unit checks
-        shell: ${{ matrix.shell }}
         run: |
           & ./tests/qubixctl.Tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
