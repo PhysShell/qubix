@@ -13,6 +13,11 @@ let
   # Instead, take whatever xrdp negotiated with *this* client and keep a Latin
   # group alongside it, plus a toggle: a German client gets "us,de", a Russian
   # one "us,ru", and a Latin-only client keeps its single group untouched.
+  # Note that services.xserver.xkb.options is deliberately NOT forwarded here.
+  # Its NixOS default is terminate:ctrl_alt_bksp, which xrdp never applies on
+  # its own; passing it through would newly arm Ctrl+Alt+Backspace to kill the
+  # X server, and in a kiosk session that means the RDP window vanishes on a
+  # stray keypress.  Only the group toggle is set.
   session = pkgs.writeShellScript "qubix-xrdp-session" ''
     layout=$(${pkgs.xorg.setxkbmap}/bin/setxkbmap -query \
       | ${pkgs.gawk}/bin/awk '/^layout:/ { print $2 }')
@@ -23,7 +28,6 @@ let
     ${pkgs.xorg.setxkbmap}/bin/setxkbmap \
       -layout "''${layout:-${kb.latinGroup}}" \
       -option "" \
-      -option "${config.services.xserver.xkb.options}" \
       -option "${kb.toggle}" || true
 
     exec ${config.qubix.session.command}
