@@ -26,6 +26,7 @@
     destroy   remove VM + system disk (add -Purge to delete the home disk too)
     fetch     download release images into the cache without touching the VM
     build     build images in WSL (developer path)
+    gc        report and (with -Force) delete unused cached images
     manifest  print the resolved machine config
 
 .PARAMETER ImageSource
@@ -43,7 +44,7 @@
     Justification = 'Script parameters are consumed by Invoke-QubixMain; the analyzer does not follow that.')]
 [CmdletBinding()]
 param(
-    [ValidateSet('up', 'connect', 'start', 'stop', 'status', 'recreate', 'destroy', 'fetch', 'build', 'manifest')]
+    [ValidateSet('up', 'connect', 'start', 'stop', 'status', 'recreate', 'destroy', 'fetch', 'build', 'gc', 'manifest')]
     [string]$Command = 'up',
 
     [string]$Machine = 'spotibox',
@@ -73,7 +74,13 @@ param(
     [int]$TimeoutSeconds = 300,
     [switch]$NoConnect,
     [switch]$NoSavedCredential,
-    [switch]$Purge
+    [switch]$Purge,
+
+    # gc only.  Without -Force nothing is deleted, which is the default so
+    # that a stray `gc` cannot cost anyone their images.  -All additionally
+    # drops the cache of the image that is currently installed.
+    [switch]$Force,
+    [switch]$All
 )
 
 Set-StrictMode -Version Latest
@@ -765,6 +772,78 @@ function Initialize-QubixVm {
     Set-Content -LiteralPath $Paths.VersionFile -Value $Version
 }
 
+# --------------------------------------------------------------------------
+# Image cache garbage collection
+# --------------------------------------------------------------------------
+
+function Select-QubixGarbage {
+    # Pure decision half of `gc`, so it can be unit-checked without a disk.
+    #
+    # Cache layout is <vmRoot>\images\<host>\<name>, where <name> is either a
+    # release tag or the literal 'local'.  A tag directory is worth keeping: it
+    # saves re-downloading a couple of gigabytes.  'local' never is - it only
+    # ever holds a copy unpacked from a file the caller already has.
+    param(
+        [string[]]$CacheNames,
+        [string]$InstalledVersion,
+        [bool]$All
+    )
+
+    # image-version.txt holds a bare tag for release images, and a prefixed
+    # marker ('file:...', 'wsl:...') otherwise, so only a colon-free value can
+    # name a cache directory worth preserving.
+    $keep = ''
+    if (-not $All -and $InstalledVersion -and ($InstalledVersion -notmatch ':')) {
+        $keep = $InstalledVersion.Trim()
+    }
+
+    $garbage = @()
+    foreach ($name in $CacheNames) {
+        if ($name -eq 'local') { $garbage += $name; continue }
+        if ($keep -and ($name -eq $keep)) { continue }
+        $garbage += $name
+    }
+    return $garbage
+}
+
+function Get-QubixPathSize {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) { return [int64]0 }
+    $sum = Get-ChildItem -LiteralPath $Path -Recurse -File -ErrorAction SilentlyContinue |
+        Measure-Object -Property Length -Sum
+    if ($null -eq $sum.Sum) { return [int64]0 }
+    return [int64]$sum.Sum
+}
+
+function Format-QubixSize {
+    param([int64]$Bytes)
+    return ('{0:N2} GB' -f ($Bytes / 1GB))
+}
+
+function Get-QubixForeignImage {
+    # Disk images sitting under vmRoot that this controller did not put there -
+    # typically staged by hand for -ImageSource file.  They are reported and
+    # never deleted: cleaning up after the machine is one thing, deleting what
+    # a person placed themselves is another.
+    param([object]$Paths)
+
+    if (-not (Test-Path -LiteralPath $Paths.VmRoot)) { return @() }
+
+    $skip = @($Paths.VmDir, (Join-QubixPath $Paths.VmRoot 'images'))
+    return @(
+        Get-ChildItem -LiteralPath $Paths.VmRoot -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object {
+                # $_ is rebound by the inner Where-Object, so hold on to the file.
+                $file = $_
+                ($file.Name -like '*.vhdx' -or $file.Name -like '*.vhdx.gz') -and
+                -not ($skip | Where-Object {
+                    $_ -and $file.FullName.StartsWith($_, [StringComparison]::OrdinalIgnoreCase)
+                })
+            }
+    )
+}
+
 function Get-QubixVm {
     param([object]$Paths)
     return Get-VM -Name $Paths.VmName -ErrorAction SilentlyContinue
@@ -1062,6 +1141,62 @@ function Invoke-QubixRecreate {
     Invoke-QubixUp -Config $Config -Paths $Paths -Ctx $Ctx
 }
 
+function Invoke-QubixGc {
+    param(
+        [object]$Paths,
+        [bool]$DeleteThem,
+        [bool]$All
+    )
+
+    $installed = ''
+    if (Test-Path -LiteralPath $Paths.VersionFile) {
+        $installed = (Get-Content -LiteralPath $Paths.VersionFile -Raw).Trim()
+    }
+    Write-Host "Installed image: $(if ($installed) { $installed } else { '(none)' })"
+
+    $names = @()
+    if (Test-Path -LiteralPath $Paths.ImageCache) {
+        $names = @(Get-ChildItem -LiteralPath $Paths.ImageCache -Directory | ForEach-Object { $_.Name })
+    }
+    $garbage = @(Select-QubixGarbage -CacheNames $names -InstalledVersion $installed -All $All)
+    $kept = @($names | Where-Object { $garbage -notcontains $_ })
+
+    $total = [int64]0
+    foreach ($name in $garbage) {
+        $dir = Join-QubixPath $Paths.ImageCache $name
+        $size = Get-QubixPathSize -Path $dir
+        $total += $size
+        if ($DeleteThem) {
+            Write-Host "Removing $dir ($(Format-QubixSize $size))"
+            Remove-Item -LiteralPath $dir -Recurse -Force
+        } else {
+            Write-Host "Would remove $dir ($(Format-QubixSize $size))"
+        }
+    }
+
+    foreach ($name in $kept) {
+        Write-Host "Keeping  $(Join-QubixPath $Paths.ImageCache $name)  (installed image; -All removes it too)"
+    }
+
+    if ($garbage.Count -eq 0) { Write-Host 'Cache is already clean.' }
+    Write-Host "$(if ($DeleteThem) { 'Reclaimed' } else { 'Reclaimable' }): $(Format-QubixSize $total)"
+
+    # Never deleted, only surfaced: see Get-QubixForeignImage.
+    $foreign = @(Get-QubixForeignImage -Paths $Paths)
+    if ($foreign.Count -gt 0) {
+        $foreignBytes = [int64]($foreign | Measure-Object -Property Length -Sum).Sum
+        Write-Host ''
+        Write-Host "Disk images under $($Paths.VmRoot) that qubixctl did not create ($(Format-QubixSize $foreignBytes)):"
+        foreach ($f in $foreign) { Write-Host "  $($f.FullName)  ($(Format-QubixSize $f.Length))" }
+        Write-Host 'These were staged by hand; delete them yourself if they are no longer needed.'
+    }
+
+    if (-not $DeleteThem -and $garbage.Count -gt 0) {
+        Write-Host ''
+        Write-Host 'Nothing was deleted. Re-run with -Force to actually remove the entries above.'
+    }
+}
+
 function Invoke-QubixDestroy {
     param(
         [object]$Paths,
@@ -1131,6 +1266,7 @@ function Invoke-QubixMain {
         'build'    {
             Build-QubixImagesInWsl -Config $config -Distro $ctx.WslDistro -RepoPath $ctx.RepoLinuxPath | Out-Null
         }
+        'gc'       { Invoke-QubixGc -Paths $paths -DeleteThem ([bool]$Force) -All ([bool]$All) }
         'manifest' { $config | ConvertTo-Json -Depth 8 }
     }
 }

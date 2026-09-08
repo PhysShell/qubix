@@ -95,6 +95,7 @@ From a console the same thing is:
 | `destroy`  | remove VM + system disk; `-Purge` also deletes the home disk                 |
 | `fetch`    | download release images into the cache without touching the VM              |
 | `build`    | build images in WSL (developer path)                                         |
+| `gc`       | report unused cached images; `-Force` deletes them                           |
 | `manifest` | print the resolved machine config                                            |
 
 Useful switches: `-Release v0.2.0` (pin a release), `-VmRoot D:\vms`,
@@ -114,6 +115,36 @@ Release downloads use plain `https://github.com/<repo>/releases/...` URLs, so a
 public repository needs no token. Private repositories are not supported by the
 `release` source yet; use `fetch` from a machine that can reach the assets, or
 the `wsl` / `file` sources.
+
+### Reclaiming Disk Space
+
+Every `up` or `recreate` from a `.gz` leaves an unpacked copy in the cache, and
+release downloads keep one directory per tag. `gc` clears what is no longer
+needed:
+
+```bash
+qubixctl -Command gc            # dry run: what would go, and how much
+qubixctl -Command gc -Force     # delete it
+qubixctl -Command gc -Force -All  # drop the installed image's cache as well
+```
+
+Nothing is deleted without `-Force`, and the dry run needs no elevation. The
+cache directory matching `image-version.txt` is kept by default, since
+re-fetching a release means downloading the assets again; `-All` is the
+`nix-collect-garbage -d` of this command. `local/` is always dropped - it only
+ever holds a copy unpacked from a file the caller already has.
+
+The VM directory is never touched: not the home disk, not the live system disk.
+Images staged by hand under `vmRoot` (for `-ImageSource file`) are **reported
+but never deleted** - tidying up after the controller is one thing, deleting
+what a person put there is another:
+
+```text
+Disk images under C:\HyperV\Qubix that qubixctl did not create (18.67 GB):
+  C:\HyperV\Qubix\src\spotibox-kb.vhdx  (5.57 GB)
+  ...
+These were staged by hand; delete them yourself if they are no longer needed.
+```
 
 ## Persistence Model
 
