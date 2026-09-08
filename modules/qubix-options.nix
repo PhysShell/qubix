@@ -49,6 +49,29 @@
       '';
     };
 
+    keyboard = {
+      latinGroup = lib.mkOption {
+        type = lib.types.str;
+        default = "us";
+        description = ''
+          XKB layout kept as the first group in remote sessions, so a Latin
+          keyboard is always available for shell commands regardless of what
+          the connecting client uses.
+        '';
+      };
+
+      toggle = lib.mkOption {
+        type = lib.types.str;
+        default = "grp:win_space_toggle";
+        example = "grp:alt_shift_toggle";
+        description = ''
+          XKB option that switches between the Latin group and the client's
+          own layout.  Win+Space matches the Windows shortcut; note that Win
+          keys only reach the guest when mstsc runs full screen.
+        '';
+      };
+    };
+
     homeDisk = {
       enable = lib.mkOption {
         type = lib.types.bool;

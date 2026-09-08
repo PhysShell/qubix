@@ -332,6 +332,30 @@ PipeWire       -> disabled
 EasyEffects is intentionally not the active DSP baseline here. It is
 PipeWire-oriented, while this xrdp audio path expects PulseAudio.
 
+### Keyboard groups in remote sessions
+
+xrdp pins the guest's XKB layout to whatever the client had **at connect time**
+and never revisits it: RDP carries the layout once, in the Client Info PDU, and
+sends bare scancodes afterwards. Switching the layout on the Windows side does
+nothing in the guest until you reconnect - which reads as "the VM ignores my
+keyboard" and is really "the VM was told once and never again".
+
+`profiles/remote/xrdp.nix` wraps the session so that, once xrdp has applied the
+client's layout, a Latin group is added next to it plus a toggle. The list is
+not hardcoded: whatever the client negotiated is what gets a companion group, so
+a German client gets `us,de` and a Russian one `us,ru`, while a Latin-only
+client keeps its single group and notices nothing. Tunable through
+`qubix.keyboard.latinGroup` and `qubix.keyboard.toggle`.
+
+Two caveats worth knowing:
+
+- The default toggle is `grp:win_space_toggle`, and **Win keys only reach the
+  guest when mstsc runs full screen** (`Ctrl+Alt+Break` toggles that). In a
+  windowed session Windows keeps Win+Space for itself.
+- On *reconnect* to an existing session the wrapper does not run again, so the
+  groups can collapse back to the client's single layout. Fixing that properly
+  belongs in xrdp, not here.
+
 ### Why PCM-only audio
 
 nixpkgs builds xrdp with `--enable-mp3lame` and `--enable-opus`. With those
