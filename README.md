@@ -95,6 +95,7 @@ From a console the same thing is:
 | `destroy`  | remove VM + system disk; `-Purge` also deletes the home disk                 |
 | `fetch`    | download release images into the cache without touching the VM              |
 | `build`    | build images in WSL (developer path)                                         |
+| `gc`       | report unused cached images; `-Force` deletes them                           |
 | `manifest` | print the resolved machine config                                            |
 
 Useful switches: `-Release v0.2.0` (pin a release), `-VmRoot D:\vms`,
@@ -114,6 +115,36 @@ Release downloads use plain `https://github.com/<repo>/releases/...` URLs, so a
 public repository needs no token. Private repositories are not supported by the
 `release` source yet; use `fetch` from a machine that can reach the assets, or
 the `wsl` / `file` sources.
+
+### Reclaiming Disk Space
+
+Every `up` or `recreate` from a `.gz` leaves an unpacked copy in the cache, and
+release downloads keep one directory per tag. `gc` clears what is no longer
+needed:
+
+```bash
+qubixctl -Command gc            # dry run: what would go, and how much
+qubixctl -Command gc -Force     # delete it
+qubixctl -Command gc -Force -All  # drop the installed image's cache as well
+```
+
+Nothing is deleted without `-Force`, and the dry run needs no elevation. The
+cache directory matching `image-version.txt` is kept by default, since
+re-fetching a release means downloading the assets again; `-All` is the
+`nix-collect-garbage -d` of this command. `local/` is always dropped - it only
+ever holds a copy unpacked from a file the caller already has.
+
+The VM directory is never touched: not the home disk, not the live system disk.
+Images staged by hand under `vmRoot` (for `-ImageSource file`) are **reported
+but never deleted** - tidying up after the controller is one thing, deleting
+what a person put there is another:
+
+```text
+Disk images under C:\HyperV\Qubix that qubixctl did not create (18.67 GB):
+  C:\HyperV\Qubix\src\spotibox-kb.vhdx  (5.57 GB)
+  ...
+These were staged by hand; delete them yourself if they are no longer needed.
+```
 
 ## Persistence Model
 
@@ -331,6 +362,30 @@ PipeWire       -> disabled
 
 EasyEffects is intentionally not the active DSP baseline here. It is
 PipeWire-oriented, while this xrdp audio path expects PulseAudio.
+
+### Keyboard groups in remote sessions
+
+xrdp pins the guest's XKB layout to whatever the client had **at connect time**
+and never revisits it: RDP carries the layout once, in the Client Info PDU, and
+sends bare scancodes afterwards. Switching the layout on the Windows side does
+nothing in the guest until you reconnect - which reads as "the VM ignores my
+keyboard" and is really "the VM was told once and never again".
+
+`profiles/remote/xrdp.nix` wraps the session so that, once xrdp has applied the
+client's layout, a Latin group is added next to it plus a toggle. The list is
+not hardcoded: whatever the client negotiated is what gets a companion group, so
+a German client gets `us,de` and a Russian one `us,ru`, while a Latin-only
+client keeps its single group and notices nothing. Tunable through
+`qubix.keyboard.latinGroup` and `qubix.keyboard.toggle`.
+
+Two caveats worth knowing:
+
+- The default toggle is `grp:win_space_toggle`, and **Win keys only reach the
+  guest when mstsc runs full screen** (`Ctrl+Alt+Break` toggles that). In a
+  windowed session Windows keeps Win+Space for itself.
+- On *reconnect* to an existing session the wrapper does not run again, so the
+  groups can collapse back to the client's single layout. Fixing that properly
+  belongs in xrdp, not here.
 
 ### Why PCM-only audio
 

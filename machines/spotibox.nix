@@ -26,6 +26,11 @@
     audio = "pulseaudio-xrdp";
     app = "spotify";
     kernel = "default";
+    # RDP only reports the client's *active* layout, so a Russian typist
+    # connecting while Windows sits on the US layout would otherwise get a
+    # single Latin group and nothing to toggle to.  Name both explicitly.
+    keyboard.layouts = "us,ru";
+
     homeDisk.sizeMiB = 16 * 1024;
     network = { staticIp = "192.168.250.10"; gateway = "192.168.250.1"; };
   };

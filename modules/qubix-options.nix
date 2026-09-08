@@ -49,6 +49,45 @@
       '';
     };
 
+    keyboard = {
+      latinGroup = lib.mkOption {
+        type = lib.types.str;
+        default = "us";
+        description = ''
+          XKB layout kept as the first group in remote sessions, so a Latin
+          keyboard is always available for shell commands regardless of what
+          the connecting client uses.
+        '';
+      };
+
+      layouts = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        example = "us,ru";
+        description = ''
+          Explicit XKB layout list for remote sessions.  Empty (the default)
+          keeps whatever layout xrdp negotiated with the client and places
+          `latinGroup` beside it, which keeps the image client-agnostic.
+
+          Set this when the people using the appliance need a layout their RDP
+          client does not announce - a Russian typist connecting while the
+          Windows side happens to sit on the US layout, for example.  RDP only
+          reports the client's *active* layout, so that case cannot be guessed.
+        '';
+      };
+
+      toggle = lib.mkOption {
+        type = lib.types.str;
+        default = "grp:win_space_toggle";
+        example = "grp:alt_shift_toggle";
+        description = ''
+          XKB option that switches between the Latin group and the client's
+          own layout.  Win+Space matches the Windows shortcut; note that Win
+          keys only reach the guest when mstsc runs full screen.
+        '';
+      };
+    };
+
     homeDisk = {
       enable = lib.mkOption {
         type = lib.types.bool;

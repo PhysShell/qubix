@@ -130,6 +130,47 @@ try {
     Assert-True ((Get-QubixAddress -Config $config -Explicit '10.0.0.5') -eq '10.0.0.5') 'explicit address wins'
     Assert-True ((Get-QubixAddress -Config $config -Explicit '') -eq (Get-Prop $config 'staticIp')) 'static IP is used without Hyper-V lookups'
     Assert-True (-not (Test-TcpPort -TargetHost '127.0.0.1' -Port 1 -TimeoutMs 500)) 'closed ports are reported as closed'
+
+    # --- gc ----------------------------------------------------------------
+    # 'local' is a copy of something the caller already has, so it always goes.
+    Assert-True ((Select-QubixGarbage -CacheNames @('local') -InstalledVersion 'v1.0.0' -All $false) -contains 'local') 'gc always drops the local cache'
+
+    # A release tag matching image-version.txt is worth keeping: re-fetching it
+    # would mean downloading the assets again.
+    $g = @(Select-QubixGarbage -CacheNames @('v1.0.0', 'v0.9.0', 'local') -InstalledVersion 'v1.0.0' -All $false)
+    Assert-True ($g -notcontains 'v1.0.0') 'gc keeps the installed release cache'
+    Assert-True ($g -contains 'v0.9.0') 'gc drops release caches that are not installed'
+    Assert-True ($g -contains 'local') 'gc drops local alongside stale tags'
+
+    # -All is the nix-collect-garbage -d equivalent.
+    $gAll = @(Select-QubixGarbage -CacheNames @('v1.0.0', 'local') -InstalledVersion 'v1.0.0' -All $true)
+    Assert-True ($gAll -contains 'v1.0.0') '-All drops the installed release cache too'
+
+    # image-version.txt carries 'file:...' / 'wsl:...' for non-release images,
+    # and those can never name a cache directory.
+    $gFile = @(Select-QubixGarbage -CacheNames @('v1.0.0') -InstalledVersion 'file:spotibox.vhdx' -All $false)
+    Assert-True ($gFile -contains 'v1.0.0') 'a file: marker protects no cache directory'
+    Assert-True (@(Select-QubixGarbage -CacheNames @() -InstalledVersion '' -All $false).Count -eq 0) 'an empty cache yields no garbage'
+
+    # Sizes and the foreign-image report work off a real directory tree.
+    $gcRoot = Join-Path $tmp 'gcroot'
+    $vmDir = Join-Path $gcRoot 'qubix-box'
+    $cache = Join-Path (Join-Path $gcRoot 'images') 'box'
+    New-Item -ItemType Directory -Force -Path (Join-Path $cache 'local') | Out-Null
+    New-Item -ItemType Directory -Force -Path $vmDir | Out-Null
+    [System.IO.File]::WriteAllBytes((Join-Path (Join-Path $cache 'local') 'sys.vhdx'), (New-Object byte[] 2048))
+    [System.IO.File]::WriteAllBytes((Join-Path $vmDir 'qubix-box.vhdx'), (New-Object byte[] 512))
+    [System.IO.File]::WriteAllBytes((Join-Path $gcRoot 'staged.vhdx'), (New-Object byte[] 1024))
+
+    Assert-True ((Get-QubixPathSize -Path (Join-Path $cache 'local')) -eq 2048) 'cache size is measured recursively'
+    Assert-True ((Get-QubixPathSize -Path (Join-Path $tmp 'missing')) -eq 0) 'a missing path measures as zero'
+
+    $gcPaths = [PSCustomObject]@{ VmRoot = $gcRoot; VmDir = $vmDir; ImageCache = $cache }
+    $foreign = @(Get-QubixForeignImage -Paths $gcPaths)
+    Assert-True ($foreign.Count -eq 1) 'only hand-staged images are reported as foreign'
+    Assert-True ($foreign[0].Name -eq 'staged.vhdx') 'the staged image is the one reported'
+    Assert-True (-not ($foreign.Name -contains 'qubix-box.vhdx')) 'the live system disk is never reported as foreign'
+    Assert-True (-not ($foreign.Name -contains 'sys.vhdx')) 'the controller cache is not reported as foreign'
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
