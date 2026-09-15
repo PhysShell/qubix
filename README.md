@@ -499,6 +499,60 @@ generation builder and glib's `gdbus-codegen`), perl (57 MiB, the activation
 script is written in it), systemd, and the GTK3/Xorg/xrdp/PulseAudio path the
 appliance exists to run.
 
+### Why The Image Is ext4, And What Compression Would Buy
+
+The store compresses about two and a half to one, measured rather than
+guessed, on the 1.65 GiB production closure:
+
+| | Size | Ratio |
+| --- | --- | --- |
+| the closure itself | 1686 MiB | - |
+| squashfs, zstd-6 (128 KiB blocks) | 651 MiB | 2.59x |
+| `tar \| zstd -3`, roughly what btrfs `compress=zstd` achieves | 663 MiB | 2.54x |
+| erofs, zstd-6 (systemd-repart's defaults, 4 KiB clusters) | ~812 MiB | 2.08x |
+| `tar \| gzip -9`, roughly today's release asset | 715 MiB | - |
+
+None of it is reachable from where this repo stands, and not for want of
+trying: `nixos/lib/make-disk-image.nix`, which the `nixos-generators` Hyper-V
+format calls, asserts
+
+```text
+to produce a partition table, we need to use -E offset flag which is support
+only for fsType = ext4
+```
+
+so an image with a partition table - which a Generation 2 VM needs, because it
+needs an ESP - is ext4 or nothing. That is a property of the builder, not a
+decision anybody made here.
+
+The door out is `image.repart`, NixOS's systemd-repart image module. It takes
+any filesystem systemd-repart can format (btrfs, erofs, squashfs, xfs), and
+`image.repart.verityStore` ships the appliance shape directly: a tmpfs root, a
+compressed erofs `/nix/store` under dm-verity, and a UKI on the ESP. Built as
+an experiment against this configuration it produces a 968 MiB image - 100 MiB
+of that an oversized ESP and 54 MiB the verity hash tree - in 41 seconds, in a
+plain Nix build with no QEMU and no KVM, which is also how the release job
+could stop needing the `/dev/kvm` dance it currently performs.
+
+Two things are worth knowing before anyone reaches for it:
+
+- **Compression does not make the download smaller. It makes it bigger.** The
+  release asset is a gzip of the image, and gzip of an already-compressed
+  filesystem gains nothing: 715 MiB today, around 950 MiB compressed. What
+  halves is the space the VM occupies on the Windows host, because a dynamic
+  VHDX only allocates the blocks the filesystem actually wrote - roughly
+  1.8 GB now against roughly 0.95 GB. Whether that trade is worth taking
+  depends on whether the machine downloads once and keeps the VM, which it
+  does.
+- Hardlink deduplication - what `nix-store --optimise` does - is not the
+  missing gigabyte. Hashing every file in the closure finds 4192 duplicates
+  worth 29 MiB, or 1.8%. Nix already deduplicates at the granularity that
+  matters.
+
+Secure Boot is already off on the VM (`Set-VMFirmware -EnableSecureBoot Off`),
+so an unsigned UKI would boot; the work is the rest of the pipeline - image
+file name, manifest, `qubixctl`, the home disk and the release job.
+
 ### Nix-Generated JSON
 
 Nix is the source of truth for the manifest. `manifest.json` is the output of
@@ -543,6 +597,11 @@ tests/
 
 ## TODO / Later Goals
 
+- Move the image to `image.repart` with a compressed, dm-verity-protected
+  erofs store (see *Why The Image Is ext4*). It halves what the VM occupies on
+  the host, makes the system disk verifiable rather than merely disposable,
+  and drops the KVM requirement from the release job - at the cost of a larger
+  download and a new boot path (UKI + systemd initrd).
 - Spotify network lockdown via nftables, proxy or DNS allowlist.
 - PipeWire + EasyEffects experiment once xrdp audio is understood.
 - Hardening profile, possibly inspired by nix-mineral, applied carefully.
