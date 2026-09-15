@@ -23,7 +23,6 @@ pkgs.testers.nixosTest {
     machine.succeed("test $(id -u rdp) = 1001")
     machine.succeed("command -v spotify")
     machine.succeed("command -v openbox-session")
-    machine.succeed("command -v pavucontrol")
     machine.succeed("systemctl is-enabled xrdp")
     machine.succeed("systemctl is-enabled avahi-daemon")
 
@@ -37,5 +36,19 @@ pkgs.testers.nixosTest {
     ).strip()
     machine.succeed(f"grep -q spotibox-session {wrapper}")
     machine.succeed("grep -q 'class=\"Spotify\"' /etc/qubix/openbox-rc.xml")
+
+    # This is a production image: everything that only exists to debug the
+    # appliance has to be missing from it, because anything still present is
+    # also still in the closure.  The debug image keeps all of it; see
+    # tests/appliance-split.nix for the evaluation-level version of this.
+    machine.fail("command -v xterm")
+    machine.fail("command -v pavucontrol")
+    machine.fail("command -v alsamixer")
+    machine.fail("command -v strace")
+    machine.fail("command -v nixos-rebuild")
+    machine.fail("command -v man")
+
+    # The kiosk session comes from xrdp; nothing greets anybody locally.
+    machine.fail("systemctl is-enabled display-manager.service")
   '';
 }

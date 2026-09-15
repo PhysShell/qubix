@@ -42,10 +42,18 @@ lib.mkIf (config.qubix.audio == "pulseaudio-xrdp") {
   services.pulseaudio.enable = true;
   services.pipewire.enable = false;
 
-  environment.systemPackages = with pkgs; [
+  # Neither pulseaudio nor pulseaudio-module-xrdp is listed here on purpose.
+  # services.pulseaudio.enable installs the daemon package itself, and it may
+  # install an *overridden* build (zeroconf); services.xrdp.audio.enable
+  # installs the module for session autostart.  Naming the plain packages again
+  # would pin a second, un-overridden copy of each into the closure — an
+  # appliance carrying two PulseAudios, with an arbitrary winner in PATH.
+  #
+  # pavucontrol and alsa-utils are mixer-debugging tools.  The kiosk has no way
+  # to launch a GTK mixer and no terminal to run speaker-test from, so they only
+  # earn their place in the closure on debug images.
+  environment.systemPackages = lib.optionals (config.qubix.mode == "debug") (with pkgs; [
     pavucontrol
     alsa-utils
-    pulseaudio
-    pulseaudio-module-xrdp
-  ];
+  ]);
 }

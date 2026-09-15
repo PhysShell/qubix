@@ -35,11 +35,20 @@
     # VHDX (root filesystem, growPartition, Hyper-V guest services included).
     evalMachine = modules: lib.nixosSystem {
       inherit system pkgs;
-      modules = modules ++ [
-        "${nixpkgs}/nixos/modules/virtualisation/hyperv-image.nix"
-      ];
+      modules = modules ++ imageModules;
       specialArgs = { inherit self; };
     };
+
+    # The upstream Hyper-V image module plus Qubix's override of it (see
+    # profiles/image/hyperv.nix).  Both the `nixosConfigurations.*` evaluation
+    # and the nixos-generators build path have to see the same pair, or the
+    # VHDX would stop matching the config the manifest and the tests describe.
+    # nixos-generators imports the upstream module itself; Nix keys modules by
+    # path, so naming it twice is free.
+    imageModules = [
+      "${nixpkgs}/nixos/modules/virtualisation/hyperv-image.nix"
+      ./profiles/image/hyperv.nix
+    ];
 
     # Extract network-related manifest fields from an evaluated NixOS config.
     # Returns an empty attrset when no static IP is configured (DHCP mode).
@@ -115,7 +124,7 @@
         inherit system pkgs lib;
         nixosSystem = lib.nixosSystem;
         format = "hyperv";
-        modules = modules;
+        modules = modules ++ imageModules;
         specialArgs = {
           inherit self;
         };
@@ -180,12 +189,29 @@
 
       qubix-manifest-json = manifestJson;
 
+      # The systems the images are made of.  A VHDX is its `toplevel` closure
+      # plus a filesystem around it, and toplevel builds without KVM, so this
+      # is what `tools/closure.sh` measures and what the CI closure budget
+      # gates on.  It is also the fastest way to check "does this change even
+      # build" without waiting for an image.
+      spotibox-toplevel       = spotibox.config.system.build.toplevel;
+      spotibox-debug-toplevel = spotiboxDebug.config.system.build.toplevel;
+
       default = self.packages.${system}.spotibox-vhdx;
     };
 
-    checks.${system}.spotibox-basic =
-      import ./tests/spotibox-basic.nix {
-        inherit pkgs;
-      };
+    checks.${system} = {
+      spotibox-basic =
+        import ./tests/spotibox-basic.nix {
+          inherit pkgs;
+        };
+
+      spotibox-appliance-split =
+        import ./tests/appliance-split.nix {
+          inherit pkgs lib;
+          prod = spotibox.config;
+          debug = spotiboxDebug.config;
+        };
+    };
   };
 }

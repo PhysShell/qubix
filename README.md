@@ -49,7 +49,12 @@ WSL is not required on the host. It stays available as the developer loop
 - Separate `user` and `rdp` accounts (pinned UIDs) to avoid session
   cross-contamination.
 - A NixOS smoke test for users, xrdp, Spotify, Openbox, Avahi and the kiosk
-  session wiring.
+  session wiring - and for what the production image must *not* contain.
+- A production/debug split that is enforced rather than aspirational:
+  `qubix.mode` decides, `tests/appliance-split.nix` fails the build when a
+  debugging tool reappears in the appliance, and `tools/closure.sh` holds the
+  production image to a closure budget in CI. That took 1.1 GiB (28%) out of
+  the image; see *Closure Budget*.
 
 ## Quick Start (Windows, No WSL)
 
@@ -177,6 +182,7 @@ unchecked until a PR exists - open one early if you want the signal.
 | Job | Runner | What it does |
 | --- | --- | --- |
 | `flake check, manifest sync, home seed` | ubuntu | `nix flake check`, fails on `manifest.json` drift, builds the home seed |
+| `production closure budget` | ubuntu | builds `system.build.toplevel`, fails when the appliance grows past `tests/closure-budget.nix` or starts carrying a nixpkgs channel again |
 | `controller lint + unit checks (powershell)` | windows | unit checks under Windows PowerShell 5.1, the shell `qubix-up.cmd` actually uses |
 | `controller lint + unit checks (pwsh)` | windows | the same checks under pwsh 7, plus PSScriptAnalyzer |
 
@@ -285,8 +291,12 @@ already exists (Docker, a lab switch), reuse it or switch spotibox to DHCP.
 ## Validation
 
 ```bash
-nix flake check --no-build                                   # evaluates every system and the test
+nix flake check --no-build                                   # every system, the VM test, the prod/debug split
 nix build .#checks.x86_64-linux.spotibox-basic               # boots the appliance in QEMU
+tools/closure.sh report                                      # what the production image is made of
+tools/closure.sh diff                                        # what the debug image adds on top of it
+tools/closure.sh why cups                                    # who is still holding on to a store path
+tools/closure.sh check                                       # the CI closure gate, locally
 pwsh ./tests/qubixctl.Tests.ps1                              # controller unit checks
 ```
 
@@ -294,8 +304,9 @@ Manual acceptance on Windows:
 
 1. Double-click `tools\qubix-up.cmd`; Hyper-V shows `qubix-spotibox` running.
 2. The RDP window opens as `rdp` with Spotify maximised and undecorated.
-3. Audio plays through the host; `pavucontrol` (via an `xterm` from the Hyper-V
-   console, user `user`) shows the xrdp sink.
+3. Audio plays through the host. The production image has neither a mixer nor
+   a terminal any more: to look at the xrdp sink, build `spotibox-debug`, which
+   keeps `pavucontrol`, an `xterm` and ssh.
 4. Log into Spotify, run `qubixctl -Command recreate`, click again: still
    logged in.
 5. Quit Spotify: the RDP window closes.
@@ -410,6 +421,59 @@ keep running the untouched build - the option silently does nothing. A fix is op
 upstream as [nixpkgs#452303](https://github.com/NixOS/nixpkgs/pull/452303); when it
 lands, this overlay can become a plain `services.xrdp.package` assignment.
 
+### Closure Budget
+
+The VHDX is not a filesystem somebody installed packages into. It is the
+closure of `system.build.toplevel` with a partition table around it: a package
+ships because something in the system still refers to it. That is why
+`nix-store --gc` inside the guest cannot make the image smaller, and why every
+size decision here is a decision about *roots* - drop the reference and Nix
+stops copying the path by itself.
+
+`profiles/modes/prod.nix` is where the production image stops being a general
+purpose NixOS box. Measured with `tools/closure.sh` against nixpkgs 25.11:
+
+| Taken out of the production image | Closure |
+| --- | --- |
+| baseline, before any of this | 3.82 GiB |
+| speech-dispatcher, espeak-ng, flite and 648 MiB of MBROLA voices | -699 MiB |
+| the nixpkgs sources pinned into `/etc/nix/registry.json` and `NIX_PATH` | -186 MiB |
+| the display-manager layer: LightDM, the NixOS xsession script, feh, Ghostscript | -84 MiB |
+| xterm, pavucontrol, alsa-utils, man-db, docs, installer tools, `environment.defaultPackages` | -160 MiB |
+| **production total** | **2.72 GiB (-28.8%)** |
+
+Two of those were never asked for by anything in the appliance:
+
+- `services/misc/graphical-desktop.nix` switches `services.speechd` on for any
+  system with a graphical session - "default guessed conservatively", says the
+  module - and speech-dispatcher pulls in a diphone voice corpus. Spotify does
+  not talk to the user.
+- Building a NixOS system from a flake pins the nixpkgs sources into the
+  system-wide flake registry and `NIX_PATH`, so that `nix run nixpkgs#hello`
+  works offline on the machine. The appliance runs no nix commands, and
+  upstream documents the closure cost of leaving it on.
+
+A third one never reaches `toplevel` at all. `nixos/lib/make-disk-image.nix`
+copies a whole nixpkgs source tree into the image as the root user's `nixos`
+channel unless told otherwise, and the upstream Hyper-V module never tells it:
+`copyChannel` defaults to true. `profiles/image/hyperv.nix` calls
+make-disk-image itself with `copyChannel = false` for production images, taking
+another ~186 MiB of Nix expressions out of the VHDX - a second copy of the tree
+the registry was already pinning. `tools/closure.sh check` fails if it returns.
+
+Debug images keep every bit of it, plus ssh, strace, an xterm and a mixer. The
+switch is `qubix.mode`, and `machines/spotibox-debug.nix` is still three lines.
+
+What remains is mostly honest: Spotify itself (345 MiB), the Mesa + LLVM
+software GL stack (768 MiB, because Hyper-V has no GPU and Chromium wants
+libGL), the kernel and its modules, and the Xorg/xrdp/PulseAudio path the
+appliance exists to run. The next cut is Spotify's own wrapper - nixpkgs gives
+the generic package an `LD_LIBRARY_PATH` naming every library Spotify might
+ever `dlopen`, and Nix reads those store paths as references. That is how
+zenity, GTK4, gst-plugins-bad, wildmidi and a 32 MiB MIDI patch set ended up in
+a music player's closure. Removing them needs tracing rather than guessing; see
+*TODO*.
+
 ### Nix-Generated JSON
 
 Nix is the source of truth for the manifest. `manifest.json` is the output of
@@ -430,8 +494,9 @@ profiles/
   apps/spotify.nix         Spotify package, kiosk rc.xml, spotibox-session
   audio/pulseaudio-xrdp.nix
   gui/openbox.nix
+  image/hyperv.nix         Hyper-V image without the nixpkgs channel copy
   kernel/default.nix
-  modes/debug.nix, prod.nix
+  modes/debug.nix, prod.nix  what a debug image adds, what a production one drops
   network/default.nix
   remote/xrdp.nix          xrdp server, session = qubix.session.command
   security/minimal.nix
@@ -441,8 +506,11 @@ tools/
   qubixctl.cmd             console wrapper
   qubix-up.cmd             double-click launcher (elevates, runs `up`)
   update-manifest.sh
+  closure.sh               closure census and budget (report/diff/why/check/baseline)
 tests/
   spotibox-basic.nix       NixOS VM test
+  appliance-split.nix      evaluation-only guard for the prod/debug split
+  closure-budget.nix       recorded production closure budget, enforced by CI
   qubixctl.Tests.ps1       controller unit checks
 .github/workflows/
   ci.yml, release.yml
@@ -453,7 +521,20 @@ tests/
 - Spotify network lockdown via nftables, proxy or DNS allowlist.
 - PipeWire + EasyEffects experiment once xrdp audio is understood.
 - Hardening profile, possibly inspired by nix-mineral, applied carefully.
-- Production image with fewer debug tools (drop `xterm` from prod).
+- A Spotibox-specific Spotify derivation. The generic nixpkgs wrapper exports
+  an `LD_LIBRARY_PATH` covering every library Spotify might `dlopen` - CUPS,
+  appindicator, zenity - and each of those store paths is a closure reference
+  whether or not the library is ever opened. Trace the real ones first
+  (`strace -ff -e trace=openat,openat2,access` across login, playback, seek,
+  volume, audio reconnect, RDP reconnect, settings, logout) and only then start
+  removing entries, one cold end-to-end run at a time.
+- Find out whether the appliance needs Mesa and LLVM at all (768 MiB of
+  software GL) or whether Chromium falls back to its bundled SwiftShader over
+  xrdp.
+- `nix.enable = false` for production images, once boot, xrdp and the release
+  pipeline have been checked without a package manager inside the guest.
+- Openbox drags a full python3 (107 MiB) into the image for
+  `openbox-xdg-autostart`, which the kiosk session never runs.
 - Kernel profile experiments: default/latest/hardened first, custom tiny kernel later.
 - Hyper-V differencing disks for disposable runtime clones.
 - Private-repository release downloads (token-authenticated asset URLs).
