@@ -27,8 +27,15 @@ pkgs.testers.nixosTest {
     machine.succeed("systemctl is-enabled xrdp")
     machine.succeed("systemctl is-enabled avahi-daemon")
 
-    # The xrdp session must be the Spotify kiosk session, not a bare WM.
-    machine.succeed("grep -q spotibox-session /etc/xrdp/startwm.sh")
+    # The xrdp session must be the Spotify kiosk session, not a bare WM.  What
+    # startwm.sh names is the keyboard wrapper from profiles/remote/xrdp.nix,
+    # and the wrapper is what execs the kiosk session, so the check has to
+    # follow both links - grepping startwm.sh for the session name alone
+    # silently stopped meaning anything when the wrapper was introduced.
+    wrapper = machine.succeed(
+        "grep -o '/nix/store/[^ ]*-qubix-xrdp-session' /etc/xrdp/startwm.sh"
+    ).strip()
+    machine.succeed(f"grep -q spotibox-session {wrapper}")
     machine.succeed("grep -q 'class=\"Spotify\"' /etc/qubix/openbox-rc.xml")
   '';
 }
