@@ -25,6 +25,8 @@ let
   prodNames = names prod;
   debugNames = names debug;
 
+  spotifyOf = cfg: lib.findFirst (p: getName p == "spotify") null cfg.environment.systemPackages;
+
   has = haystack: needle: builtins.elem needle haystack;
 
   # Tools with no way to be reached from a kiosk session: the Openbox menu is
@@ -71,6 +73,22 @@ let
         + "documentation.man.enable = ${lib.boolToString prod.documentation.man.enable}";
     }
     {
+      name = "prod: no GPU driver stack";
+      # ~770 MiB of Mesa and LLVM for llvmpipe, on a machine whose GPU does not
+      # exist and whose only graphical application ships its own renderer.
+      ok = !prod.hardware.graphics.enable;
+      detail = "hardware.graphics.enable is on";
+    }
+    {
+      name = "prod: the appliance Spotify, not the desktop one";
+      # profiles/apps/spotify.nix swaps ffmpeg_4 for its headless build and
+      # drops zenity; both together are worth ~330 MiB of closure.
+      ok = spotifyOf prod != null
+        && spotifyOf debug != null
+        && (spotifyOf prod).drvPath != (spotifyOf debug).drvPath;
+      detail = "prod and debug carry the same Spotify derivation";
+    }
+    {
       name = "prod: no speech synthesizer";
       # ~700 MB of espeak-ng, flite and MBROLA voices, switched on for every
       # graphical NixOS system by services/misc/graphical-desktop.nix.
@@ -100,6 +118,12 @@ let
       name = "debug: keeps the tools prod dropped";
       ok = lib.all (has debugNames) debugOnly;
       detail = "missing: ${concatStringsSep " " (filter (n: !has debugNames n) debugOnly)}";
+    }
+    {
+      name = "debug: keeps a normal graphics stack";
+      ok = debug.hardware.graphics.enable;
+      detail = "hardware.graphics.enable is off in the debug image too, which "
+        + "leaves nothing to compare a rendering problem against";
     }
     {
       name = "debug: keeps sshd";

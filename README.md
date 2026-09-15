@@ -53,7 +53,7 @@ WSL is not required on the host. It stays available as the developer loop
 - A production/debug split that is enforced rather than aspirational:
   `qubix.mode` decides, `tests/appliance-split.nix` fails the build when a
   debugging tool reappears in the appliance, and `tools/closure.sh` holds the
-  production image to a closure budget in CI. That took 1.1 GiB (28%) out of
+  production image to a closure budget in CI. That took 2.2 GiB (57%) out of
   the image; see *Closure Budget*.
 
 ## Quick Start (Windows, No WSL)
@@ -436,13 +436,15 @@ purpose NixOS box. Measured with `tools/closure.sh` against nixpkgs 25.11:
 | Taken out of the production image | Closure |
 | --- | --- |
 | baseline, before any of this | 3.82 GiB |
+| Mesa and the LLVM behind llvmpipe | -768 MiB |
 | speech-dispatcher, espeak-ng, flite and 648 MiB of MBROLA voices | -699 MiB |
+| ffmpeg's SDL output device, and everything behind it (see below) | -331 MiB |
 | the nixpkgs sources pinned into `/etc/nix/registry.json` and `NIX_PATH` | -186 MiB |
-| the display-manager layer: LightDM, the NixOS xsession script, feh, Ghostscript | -84 MiB |
 | xterm, pavucontrol, alsa-utils, man-db, docs, installer tools, `environment.defaultPackages` | -160 MiB |
-| **production total** | **2.72 GiB (-28.8%)** |
+| the display-manager layer: LightDM, the NixOS xsession script, feh, Ghostscript | -84 MiB |
+| **production total** | **1.65 GiB (-56.9%)**, 1024 store paths down to 781 |
 
-Two of those were never asked for by anything in the appliance:
+Three of those were never asked for by anything in the appliance:
 
 - `services/misc/graphical-desktop.nix` switches `services.speechd` on for any
   system with a graphical session - "default guessed conservatively", says the
@@ -452,6 +454,14 @@ Two of those were never asked for by anything in the appliance:
   system-wide flake registry and `NIX_PATH`, so that `nix run nixpkgs#hello`
   works offline on the machine. The appliance runs no nix commands, and
   upstream documents the closure cost of leaving it on.
+- `hardware.graphics.enable` follows a graphical session around, and it
+  installs Mesa with the LLVM that llvmpipe needs. Hyper-V exposes no GPU, and
+  Spotify is a CEF application that carries its own renderer: traced through a
+  full startup in a VM with the option off, it loads
+  `share/spotify/libEGL.so`, `libGLESv2.so` and `libvulkan.so.1` - ANGLE over
+  SwiftShader - puts its window on screen, and never mentions
+  `/run/opengl-driver` once. Xorg keeps `libglvnd` and `mesa-libgbm`, which are
+  separate packages and two orders of magnitude smaller.
 
 A third one never reaches `toplevel` at all. `nixos/lib/make-disk-image.nix`
 copies a whole nixpkgs source tree into the image as the root user's `nixos`
@@ -464,15 +474,30 @@ the registry was already pinning. `tools/closure.sh check` fails if it returns.
 Debug images keep every bit of it, plus ssh, strace, an xterm and a mixer. The
 switch is `qubix.mode`, and `machines/spotibox-debug.nix` is still three lines.
 
-What remains is mostly honest: Spotify itself (345 MiB), the Mesa + LLVM
-software GL stack (768 MiB, because Hyper-V has no GPU and Chromium wants
-libGL), the kernel and its modules, and the Xorg/xrdp/PulseAudio path the
-appliance exists to run. The next cut is Spotify's own wrapper - nixpkgs gives
-the generic package an `LD_LIBRARY_PATH` naming every library Spotify might
-ever `dlopen`, and Nix reads those store paths as references. That is how
-zenity, GTK4, gst-plugins-bad, wildmidi and a 32 MiB MIDI patch set ended up in
-a music player's closure. Removing them needs tracing rather than guessing; see
-*TODO*.
+The Spotify line in that table is worth spelling out, because the obvious
+reading of it is wrong. The nixpkgs package exports an `LD_LIBRARY_PATH`
+naming every library Spotify might ever `dlopen`, and Nix reads each of those
+store paths as a reference - but `readelf -d` says most of them are `DT_NEEDED`
+of `libcef.so` or of the Spotify binary itself, CUPS and libayatana-appindicator
+and libdbusmenu among them. Dropping those does not shrink the image, it stops
+the process at exec time. The two that actually paid were subtler:
+
+- Spotify links `libavcodec` and `libavformat` out of `ffmpeg_4`, and referring
+  to that lib output keeps all of it - including `libavdevice`, whose SDL
+  output device pulls SDL3, which pulls zenity, GTK4, gst-plugins-bad,
+  PipeWire, BlueZ, `spandsp` (a fax-modem DSP library) and `libajantv2`
+  (support for AJA broadcast capture cards). `ffmpeg_4-headless` is the same
+  4.4.6 with the same decoders - aac, mp3, opus, vorbis, flac, pcm - and none
+  of the tail.
+- `zenity` is on `PATH` for the folder picker behind "add local files". A kiosk
+  has no local files; traced through a startup, Spotify never runs it.
+
+What is left is mostly honest: Spotify itself (345 MiB), the kernel and its
+modules (126 MiB), a python3 (107 MiB) that four separate things need
+(`hyperv-daemons`, `cloud-utils` for `growPartition`, the systemd-boot
+generation builder and glib's `gdbus-codegen`), perl (57 MiB, the activation
+script is written in it), systemd, and the GTK3/Xorg/xrdp/PulseAudio path the
+appliance exists to run.
 
 ### Nix-Generated JSON
 
@@ -521,21 +546,21 @@ tests/
 - Spotify network lockdown via nftables, proxy or DNS allowlist.
 - PipeWire + EasyEffects experiment once xrdp audio is understood.
 - Hardening profile, possibly inspired by nix-mineral, applied carefully.
-- A Spotibox-specific Spotify derivation. The generic nixpkgs wrapper exports
-  an `LD_LIBRARY_PATH` covering every library Spotify might `dlopen` - CUPS,
-  appindicator, zenity - and each of those store paths is a closure reference
-  whether or not the library is ever opened. Trace the real ones first
-  (`strace -ff -e trace=openat,openat2,access` across login, playback, seek,
-  volume, audio reconnect, RDP reconnect, settings, logout) and only then start
-  removing entries, one cold end-to-end run at a time.
-- Find out whether the appliance needs Mesa and LLVM at all (768 MiB of
-  software GL) or whether Chromium falls back to its bundled SwiftShader over
-  xrdp.
-- `nix.enable = false` for production images, once boot, xrdp and the release
-  pipeline have been checked without a package manager inside the guest.
-- Openbox drags a full python3 (107 MiB) into the image for
-  `openbox-xdg-autostart`, which the kiosk session never runs.
-- Kernel profile experiments: default/latest/hardened first, custom tiny kernel later.
+- Sign the closure work off against real hardware: the Mesa/LLVM and Spotify
+  cuts were traced and booted in a QEMU VM (window on screen, no system GL
+  opened, every decoder still present), but nothing here has logged into
+  Spotify or played a track over mstsc yet. Do one cold run of each image
+  before tagging a release.
+- `nix.enable = false` for production images (~49 MiB). Not done yet because
+  the systemd-boot generation builder calls `nix-env` by an interpolated store
+  path, so the package may well stay in the closure anyway, and the bootloader
+  step runs inside the image build - which needs KVM to test.
+- `alsa-plugins` pulls a full ffmpeg 8 (32 MiB) into an appliance that already
+  has ffmpeg 4 for Spotify; GTK3 pulls `iso-codes` (23 MiB) for a language list
+  the kiosk never shows. Both need package overrides rather than options.
+- Kernel profile experiments: default/latest/hardened first, custom tiny kernel
+  later. 126 MiB of the image is kernel modules, for a machine with exactly one
+  virtualised bus.
 - Hyper-V differencing disks for disposable runtime clones.
 - Private-repository release downloads (token-authenticated asset URLs).
 - Second backend behind the same manifest (App Sandbox / HCS) once it accepts

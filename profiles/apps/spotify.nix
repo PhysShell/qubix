@@ -1,6 +1,34 @@
 { config, lib, pkgs, ... }:
 
 let
+  # Spotify as this appliance needs it.  The stock nixpkgs package is built for
+  # a desktop, and two of its inputs bring in things a kiosk can never reach:
+  #
+  #   * it links libavcodec and libavformat out of ffmpeg_4, but referring to
+  #     that lib output keeps all of it, libavdevice included - and
+  #     libavdevice's SDL output device pulls SDL3, which pulls zenity, GTK4,
+  #     gst-plugins-bad, PipeWire, BlueZ, a fax-modem DSP library and support
+  #     for AJA broadcast capture cards.  The headless build of the same
+  #     ffmpeg 4.4.6 decodes everything Spotify streams (aac, mp3, opus,
+  #     vorbis, flac, pcm) and carries none of that.
+  #
+  #   * zenity is on PATH for the folder picker behind "add local files".  The
+  #     kiosk has no local files and no way to open settings dialogs anyway;
+  #     traced through a full startup in a VM, Spotify never touches it.
+  #
+  # Everything else in the wrapper stays.  Most of it is not optional: cups,
+  # libayatana-appindicator and libdbusmenu are DT_NEEDED of libcef.so and the
+  # Spotify binary itself, so dropping them stops the process at exec time
+  # rather than saving anything.  Debug images get the stock package.
+  spotify =
+    if config.qubix.mode == "debug" then
+      pkgs.spotify
+    else
+      pkgs.spotify.override {
+        ffmpeg_4 = pkgs.ffmpeg_4-headless;
+        zenity = pkgs.emptyDirectory;
+      };
+
   # Stock Openbox rc.xml plus one rule: every normal Spotify window is
   # undecorated and maximised.  The RDP canvas then *is* the Spotify window,
   # which is as close to "Spotify as a native window" as xrdp gets — xrdp has
@@ -24,7 +52,7 @@ let
     name = "spotibox-session";
     runtimeInputs = [
       pkgs.openbox
-      pkgs.spotify
+      spotify
       pkgs.xorg.xsetroot
     ];
     text = ''
@@ -40,7 +68,7 @@ let
   };
 in
 lib.mkIf (config.qubix.app == "spotify") {
-  environment.systemPackages = [ pkgs.spotify ];
+  environment.systemPackages = [ spotify ];
 
   environment.etc."qubix/openbox-rc.xml".source = openboxRc;
 

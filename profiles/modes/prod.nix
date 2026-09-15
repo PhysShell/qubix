@@ -32,6 +32,15 @@ lib.mkIf (config.qubix.mode == "prod") {
   services.xserver.displayManager.lightdm.enable = lib.mkForce false;
   services.displayManager.enable = lib.mkForce false;
 
+  # ~770 MiB: Mesa and the LLVM it carries for llvmpipe.  Hyper-V has no GPU
+  # to drive, and Spotify is a CEF application that ships its own software
+  # renderer: traced in a VM with this switched off, it loads
+  # share/spotify/libEGL.so, libGLESv2.so and libvulkan.so.1 - ANGLE over
+  # SwiftShader - puts its window up, and never looks at /run/opengl-driver
+  # at all.  Xorg keeps libglvnd and mesa-libgbm, which are separate and small;
+  # what leaves is the driver set nothing here can use.
+  hardware.graphics.enable = lib.mkForce false;
+
   # ~700 MB of speech synthesis.  services/misc/graphical-desktop.nix turns
   # speech-dispatcher on for anything with a graphical session ("default
   # guessed conservatively", says the module), and speech-dispatcher pulls in
