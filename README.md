@@ -298,6 +298,7 @@ tools/closure.sh report                                      # what the producti
 tools/closure.sh diff                                        # what the debug image adds on top of it
 tools/closure.sh why cups                                    # who is still holding on to a store path
 tools/closure.sh check                                       # the CI closure gate, locally
+tools/cold-boot.sh                                           # boots the real VHDX through OVMF, ESP and all
 pwsh ./tests/qubixctl.Tests.ps1                              # controller unit checks
 ```
 
@@ -449,7 +450,9 @@ purpose NixOS box. Measured with `tools/closure.sh` against nixpkgs 25.11:
 | an OpenSSH client, BIND's `host`, and the rest of `corePackages` | -38 MiB |
 | the rest of NixOS's X server module (see below) | -10 MiB |
 | the Python interpreter and `-dev` outputs inside openbox (see below) | -52 MiB |
-| **production total** | **1.42 GiB (-62.8%)**, 1024 store paths down to 638 |
+| Nix, and the Python boot-loader installer that was holding it (see below) | -52 MiB |
+| `growpart`, on a disk the controller never resizes | -1 MiB |
+| **production total** | **1.37 GiB (-64.1%)**, 1024 store paths down to 595 |
 
 Three of those were never asked for by anything in the appliance:
 
@@ -547,6 +550,67 @@ that Openbox owns the root window, and that the Spotify window is up and
 maximised. The X clients in it run as `rdp` with the session's own
 `Xauthority`, because `sesman` starts Xorg with `-auth` and root cannot open
 that display.
+
+### The Boot Loader Was Holding Nix
+
+`nix.enable = false` switched off the daemon and was worth 9 MiB, which never
+added up: the `nix` package itself stayed. The reason is one line in NixOS's
+systemd-boot installer, `systemd-boot-builder.py`:
+
+    nix-env -p /nix/var/nix/profiles/system --list-generations
+
+The installer is a Python script, it enumerates generations with `nix-env`, and
+`system.build.installBootLoader` is a runtime reference from
+`switch-to-configuration`. So an appliance that cannot rebuild itself shipped
+Nix, and behind Nix came boost, the AWS SDK (for S3 binary caches it will never
+read), libgit2, boehm-gc, onetbb, s2n-tls and seven `aws-c-*` libraries. 52 MiB
+and 43 store paths, for a generation list that is always exactly one entry
+long.
+
+`boot.loader.external` is upstream's seam for replacing the installer, and
+`profiles/modes/prod.nix` uses it: a shell script that runs `bootctl install`
+(from the systemd already in the closure) and writes one loader entry. It is
+the same systemd-boot on the ESP, including `EFI/BOOT/BOOTX64.EFI` - the
+removable path, which is what Hyper-V's firmware boots and what the upstream
+image module asks for with `boot.loader.grub.efiInstallAsRemovable`. What it
+does not do is everything an appliance cannot reach: no generation
+enumeration, no pruning of old entries, no memtest or EFI shell entries, no
+Secure Boot signing. Debug images keep the stock builder, because
+`nixos-rebuild switch` inside the guest is a real debugging workflow there.
+
+The obvious-looking alternative is worse. Turning `boot.loader.systemd-boot`
+off does not reveal a dead GRUB underneath: `systemd-boot.nix` sets
+`boot.loader.grub.enable = mkDefault false`, so systemd-boot is the live one
+and the GRUB block in `hyperv-image.nix` is the inert one. Switching to GRUB
+means `install-grub.pl`, which means Perl - and
+`system.forbiddenDependenciesRegexes` fails the build with the whole list of
+Perl packages, which is the guard doing its job.
+
+This is also the first change here that can produce an unbootable appliance,
+so it is the first one with a cold boot behind it. `tools/cold-boot.sh` builds
+the VHDX, attaches the home seed next to it and lets OVMF - the same firmware
+class as a Hyper-V generation 2 VM with Secure Boot off - find
+`EFI/BOOT/BOOTX64.EFI` on its own. Firmware loads the loader, the loader loads
+the entry, the EFI stub loads the initrd, the root and home filesystems mount,
+the static address comes up, and xrdp answers an X.224 connection request from
+outside the VM. The NixOS VM tests cannot cover any of that: they boot with
+`-kernel`/`-initrd` and never touch an ESP.
+
+### The Partition Nobody Resizes
+
+`boot.growPartition` comes from the upstream Hyper-V image, and it exists for
+one scenario: the virtual disk was enlarged after the image was written, so
+the partition table still describes the old size. `growpart` stretches the
+partition, `systemd-growfs` stretches the filesystem onto it.
+
+There is no `Resize-VHD` anywhere in `tools/qubixctl.ps1`. It downloads a
+`.vhdx.gz` of a fixed size, gunzips it, attaches it and starts the VM;
+`recreate` replaces the image rather than growing it. So the service has run on
+every boot of every Spotibox, looked at a partition that already filled the
+disk, and gone home - for `gptfdisk` and `cloud-utils-guest`, about 1 MiB.
+`fileSystems."/".autoResize` stays on: same safety net one layer up, no extra
+cost, and it is what would notice if the partition ever did change underneath
+us.
 
 ### The Window Manager With A Python Interpreter In It
 
@@ -847,6 +911,7 @@ tools/
   qubix-up.cmd             double-click launcher (elevates, runs `up`)
   update-manifest.sh
   closure.sh               closure census and budget (report/diff/why/check/baseline)
+  cold-boot.sh             boots a built VHDX through OVMF firmware, checks RDP
 tests/
   spotibox-basic.nix       NixOS VM test: what the image contains
   xrdp-session.nix         NixOS VM test: a real xrdp session, X, keyboard, kiosk

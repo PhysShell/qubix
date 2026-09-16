@@ -162,6 +162,34 @@ let
       detail = "services.speechd.enable is on in a music player";
     }
     {
+      name = "prod: the boot loader is installed without Nix";
+      # NixOS's systemd-boot installer is a Python script that calls
+      # `nix-env --list-generations`, which is how an appliance with
+      # nix.enable = false still shipped Nix, boost, the AWS SDK and libgit2.
+      # profiles/modes/prod.nix installs the same systemd-boot from a shell
+      # script through boot.loader.external instead.  Debug keeps the stock
+      # builder, because nixos-rebuild inside the guest needs it.
+      ok = prod.boot.loader.external.enable
+        && !prod.boot.loader.systemd-boot.enable
+        && !prod.boot.loader.grub.enable
+        && debug.boot.loader.systemd-boot.enable;
+      detail = "external = ${lib.boolToString prod.boot.loader.external.enable}, "
+        + "systemd-boot = ${lib.boolToString prod.boot.loader.systemd-boot.enable}, "
+        + "grub = ${lib.boolToString prod.boot.loader.grub.enable}, "
+        + "debug systemd-boot = ${lib.boolToString debug.boot.loader.systemd-boot.enable}";
+    }
+    {
+      name = "prod: nothing grows the root partition on every boot";
+      # The upstream Hyper-V image turns boot.growPartition on for disks that
+      # were enlarged after the image was written.  tools/qubixctl.ps1 has no
+      # Resize-VHD: it downloads an image of a fixed size and replaces it.
+      # autoResize stays, because it is the same safety net one layer up and
+      # costs nothing.
+      ok = !prod.boot.growPartition && prod.fileSystems."/".autoResize;
+      detail = "growPartition = ${lib.boolToString prod.boot.growPartition}, "
+        + "autoResize = ${lib.boolToString prod.fileSystems."/".autoResize}";
+    }
+    {
       name = "prod: no nixpkgs sources pinned into the system";
       # ~186 MB of Nix expressions, so that nix commands the appliance never
       # runs would resolve <nixpkgs> offline.

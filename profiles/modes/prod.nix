@@ -15,6 +15,67 @@
 # The sizes quoted below were measured against nixpkgs 25.11 with
 # tools/closure.sh; they are there to show the order of magnitude, not as
 # numbers to trust forever.
+let
+  esp = config.boot.loader.efi.efiSysMountPoint;
+
+  # NixOS installs systemd-boot with systemd-boot-builder.py, and that script
+  # enumerates generations by running `nix-env --list-generations`.  That one
+  # call is why a machine with `nix.enable = false` still shipped Nix - and
+  # with Nix came boost, the AWS SDK (S3 binary caches), libgit2, boehm-gc,
+  # onetbb and the rest of its tail: 52 MiB and 43 store paths, for a
+  # generation list that is always exactly one entry long on an image that is
+  # replaced wholesale rather than rebuilt.
+  #
+  # boot.loader.external is the upstream seam for replacing the installer.
+  # This is what the Python script does, minus everything an appliance cannot
+  # reach: no generation enumeration, no garbage collection of old entries, no
+  # memtest or EFI shell entries, no Secure Boot signing.  bootctl comes from
+  # the systemd already in the closure and writes both EFI/systemd and
+  # EFI/BOOT/BOOTX64.EFI - the removable path, which is the one Hyper-V's
+  # firmware boots and the one the upstream image module asks for with
+  # boot.loader.grub.efiInstallAsRemovable.
+  #
+  # It runs exactly once, inside the make-disk-image VM.  That VM's EFI
+  # variables are not the appliance's, so --no-variables; the removable path
+  # is what makes the image bootable without them.
+  installBootLoader = pkgs.writeShellScript "qubix-install-boot-loader" ''
+    set -eu
+    export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.gnused config.systemd.package ]}
+
+    toplevel="$1"
+
+    bootctl install --esp-path=${esp} --no-variables --graceful
+
+    # Named after the store path, so a second generation could never overwrite
+    # the kernel the running one booted from.
+    copy_to_esp() {
+      name="EFI/nixos/$(echo "$1" | sed 's|^/nix/store/||; s|/|-|g').efi"
+      if [ ! -e "${esp}/$name" ]; then
+        install -Dm444 "$1" "${esp}/$name.tmp"
+        mv "${esp}/$name.tmp" "${esp}/$name"
+      fi
+      printf '/%s' "$name"
+    }
+
+    kernel=$(copy_to_esp "$(readlink -f "$toplevel/kernel")")
+    initrd=$(copy_to_esp "$(readlink -f "$toplevel/initrd")")
+
+    mkdir -p "${esp}/loader/entries"
+    {
+      printf 'title NixOS\n'
+      printf 'version Generation 1\n'
+      printf 'linux %s\n' "$kernel"
+      printf 'initrd %s\n' "$initrd"
+      printf 'options init=%s/init %s\n' "$toplevel" "$(cat "$toplevel/kernel-params")"
+    } > "${esp}/loader/entries/nixos-generation-1.conf"
+
+    {
+      printf 'timeout %s\n' '${toString (if config.boot.loader.timeout == null then 0 else config.boot.loader.timeout)}'
+      printf 'default nixos-generation-1.conf\n'
+      printf 'editor no\n'
+    } > "${esp}/loader/loader.conf"
+  '';
+in
 lib.mkIf (config.qubix.mode == "prod") {
   # No remote shell into the appliance.  Debug images force this back on.
   services.openssh.enable = lib.mkForce false;
@@ -61,6 +122,38 @@ lib.mkIf (config.qubix.mode == "prod") {
   # tests/appliance-split.nix asserts the outcomes, so that this stays one
   # switch and not four.
   services.xserver.enable = lib.mkForce false;
+
+  # nixos/modules/virtualisation/hyperv-image.nix switches this on for every
+  # image it builds, and it exists for one scenario: somebody enlarged the
+  # virtual disk after the image was written, so the partition table still
+  # describes the old size.  `growpart` then stretches the root partition and
+  # systemd-growfs stretches the filesystem onto it.
+  #
+  # Qubix never enlarges the disk.  tools/qubixctl.ps1 downloads a .vhdx.gz,
+  # gunzips it, attaches it and starts the VM - there is no Resize-VHD
+  # anywhere in the controller, and `recreate` replaces the image rather than
+  # growing it.  So the service has run on every boot of every Spotibox,
+  # looked at a partition that already fills the disk, and gone home.
+  #
+  # ~970 KiB: gptfdisk (sgdisk, which growpart shells out to) and
+  # cloud-utils-guest.  fileSystems."/".autoResize stays on: it is the same
+  # safety net one layer up, it costs nothing extra, and it is what would
+  # notice if the partition ever did change size underneath us.
+  boot.growPartition = lib.mkForce false;
+
+  # See the installBootLoader script above: this is the same systemd-boot, put
+  # on the ESP by a shell script instead of by a Python one that needs Nix.
+  # Debug images keep the stock builder, because `nixos-rebuild switch` inside
+  # the guest is a real debugging workflow there and it wants both.
+  boot.loader.systemd-boot.enable = lib.mkForce false;
+  boot.loader.external = {
+    enable = true;
+    installHook = installBootLoader;
+  };
+
+  # Nothing writes EFI variables: the image is built in a throwaway VM whose
+  # firmware is not the appliance's, and Hyper-V boots the removable path.
+  boot.loader.efi.canTouchEfiVariables = lib.mkForce false;
 
   # ~770 MiB: Mesa and the LLVM it carries for llvmpipe.  Hyper-V has no GPU
   # to drive, and Spotify is a CEF application that ships its own software
