@@ -212,6 +212,11 @@
           prod = spotibox.config;
           debug = spotiboxDebug.config;
         };
+
+      spotibox-xrdp-session =
+        import ./tests/xrdp-session.nix {
+          inherit pkgs;
+        };
     };
   };
 }

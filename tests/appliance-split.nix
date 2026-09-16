@@ -9,10 +9,14 @@
 # building a system, and the failure names the rule instead of handing you a
 # size delta to investigate.
 #
-# Runtime behaviour (the kiosk session, xrdp, the Openbox rules) is covered by
-# tests/spotibox-basic.nix, which boots an actual VM.  The one property that
-# needs the image derivation rather than the config — that no nixpkgs channel
-# is copied into the production VHDX — is checked by `tools/closure.sh check`.
+# Runtime behaviour is covered by two VM tests: tests/spotibox-basic.nix boots
+# the image and checks what it does and does not contain, and
+# tests/xrdp-session.nix asks xrdp for a real session and checks that the X
+# server, the keyboard layouts, Openbox and the Spotify window all come up —
+# which is what stands behind turning `services.xserver.enable` off.  The one
+# property that needs the image derivation rather than the config — that no
+# nixpkgs channel is copied into the production VHDX — is checked by
+# `tools/closure.sh check`.
 
 let
   inherit (lib) concatMapStrings concatStringsSep filter getName;
@@ -57,12 +61,20 @@ let
       detail = "system.disableInstallerTools = ${lib.boolToString prod.system.disableInstallerTools}";
     }
     {
-      name = "prod: no display manager, and no session plumbing around it";
-      ok = !prod.services.xserver.displayManager.lightdm.enable
-        && !prod.services.displayManager.enable;
-      detail = "the kiosk session comes from xrdp, not from a greeter or an "
-        + "xsession script; services.xserver.enable turns both of these on by "
-        + "itself, so both have to be forced back off";
+      name = "prod: no X server module, and nothing it would have switched on";
+      # xrdp starts its own Xorg from sesman.ini; NixOS's X server module only
+      # adds a greeter, an xsession script, input drivers for devices that do
+      # not exist and a handful of X utilities.  Each of the three below is a
+      # default that follows services.xserver.enable, which is why prod turns
+      # off one option instead of four - and why they are asserted here.
+      ok = !prod.services.xserver.enable
+        && !prod.services.xserver.displayManager.lightdm.enable
+        && !prod.services.displayManager.enable
+        && !prod.gtk.iconCache.enable;
+      detail = "xserver = ${lib.boolToString prod.services.xserver.enable}, "
+        + "lightdm = ${lib.boolToString prod.services.xserver.displayManager.lightdm.enable}, "
+        + "displayManager = ${lib.boolToString prod.services.displayManager.enable}, "
+        + "gtk.iconCache = ${lib.boolToString prod.gtk.iconCache.enable}";
     }
     {
       name = "prod: documentation off, man-db included";
@@ -105,14 +117,15 @@ let
       name = "prod: the font set is chosen, not inherited";
       # The default set is DejaVu, FreeFont, Gyre, Liberation, Unifont and Noto
       # Color Emoji - 60 MiB.  This keeps the two that render what the kiosk
-      # shows.
-      # Xorg adds font-cursor-misc, font-misc-misc and font-alias itself and
-      # needs them, so this names the heavy half of the default set instead of
-      # counting entries.
+      # shows, and with the X server module off nothing else contributes to the
+      # list, so the rule can name it exactly.  The core bitmap fonts that used
+      # to arrive with that module are not missed: Xorg under xrdp never had a
+      # FontPath and runs on libXfont2's built-in "fixed" and "cursor", which
+      # tests/xrdp-session.nix asserts on a live session.
       ok =
         let names = map getName prod.fonts.packages;
         in !prod.fonts.enableDefaultPackages
-          && !(lib.any (n: lib.elem n names) [ "unifont" "freefont-ttf" "liberation-fonts" "gyre-fonts" ]);
+          && lib.sort (a: b: a < b) names == [ "dejavu-fonts" "noto-fonts-color-emoji" ];
       detail = "fonts: ${concatStringsSep " " (map getName prod.fonts.packages)}";
     }
     {
@@ -184,6 +197,18 @@ let
       name = "debug: keeps avahi and the stock font set";
       ok = debug.services.avahi.enable && debug.fonts.enableDefaultPackages;
       detail = "the debug image is supposed to stay a normal NixOS box";
+    }
+    {
+      name = "debug: keeps the X server module and its greeter";
+      # Production runs Xorg only through xrdp.  The debug image is the one
+      # place a local console session can be compared against, so it keeps the
+      # stock module - and LightDM with it, which is why the greeter in
+      # profiles/gui/openbox.nix follows services.xserver.enable rather than
+      # being asked for unconditionally.
+      ok = debug.services.xserver.enable
+        && debug.services.xserver.displayManager.lightdm.enable;
+      detail = "xserver = ${lib.boolToString debug.services.xserver.enable}, "
+        + "lightdm = ${lib.boolToString debug.services.xserver.displayManager.lightdm.enable}";
     }
     {
       name = "debug: keeps sshd";

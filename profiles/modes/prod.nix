@@ -19,18 +19,48 @@ lib.mkIf (config.qubix.mode == "prod") {
   # No remote shell into the appliance.  Debug images force this back on.
   services.openssh.enable = lib.mkForce false;
 
-  # No local login screen and no X session plumbing around it.  The session is
-  # started by xrdp, which execs qubix.session.command directly; nothing in the
-  # Spotibox path ever renders a greeter or reads an .xsession file.  The
-  # Hyper-V console keeps its text login.
+  # The X server module, and with it every desktop assumption NixOS makes once
+  # it is on.  This image does run an X server - one per xrdp session - but not
+  # the one this module configures: xrdp-sesman spawns Xorg from the command
+  # line baked into its own sesman.ini, with xorgxrdp's module path and
+  # xorg.conf, and never reads NixOS's generated /etc/X11/xorg.conf or starts
+  # display-manager.service.  Upstream says as much in the xrdp module itself:
+  # "xrdp can run X11 program even if services.xserver.enable = false".
   #
-  # Both lines are needed.  services.xserver.enable turns LightDM on by itself
-  # (as the default display manager) and switches on the display-manager layer
-  # unconditionally, and that layer is what puts NixOS's xsession script into
-  # the closure - which drags in feh, imlib2 and, through it, a full
-  # Ghostscript with X support, for an image that cannot print.
-  services.xserver.displayManager.lightdm.enable = lib.mkForce false;
-  services.displayManager.enable = lib.mkForce false;
+  # What the session needs survives, because the xrdp package hard-references
+  # it: sesman.ini names the xorg-server store path, and that server has
+  # xkbcomp and xkeyboard-config compiled into it, which is what makes the
+  # setxkbmap call in profiles/remote/xrdp.nix work.  ~10 MiB of things xrdp
+  # cannot reach leave with the module:
+  #
+  #   * the input driver stack - xf86-input-libinput, xf86-input-evdev,
+  #     libinput, libwacom and the python3 environment libwacom carries.
+  #     xorgxrdp's xorg.conf sets AutoAddDevices off and declares xrdpkeyb and
+  #     xrdpmouse as its only input devices, so none of it was ever loaded.
+  #   * the core bitmap fonts (font-misc-misc, font-cursor-misc, font-alias).
+  #     Nothing here sets a FontPath, so `xset q` on a live session reports the
+  #     font path as exactly "built-ins" - the element compiled into libXfont2,
+  #     which is where "fixed" and "cursor" come from.  These three were
+  #     indexed by fontconfig and then ignored by it.
+  #   * xrandr, xrdb and its preprocessor mcpp, xset, xinput, xprop,
+  #     xlsclients, iceauth, x11-ssh-askpass: X utilities, in an image whose
+  #     production session has no terminal to type them into.
+  #   * display-manager.service.  services.displayManager.enable was already
+  #     forced off, but the unit is declared by the X server module rather than
+  #     the display-manager one, so what shipped until now was a greeter unit
+  #     with an empty ExecStart.
+  #
+  # Three forces that used to sit here are gone with it, because all three were
+  # downstream of this switch: LightDM (the X module elects it as the default
+  # display manager, and profiles/gui/openbox.nix now follows this option
+  # instead of asking for a greeter unconditionally - LightDM asserts that the
+  # X server is on, so that had to move), services.displayManager.enable (the X
+  # module turns it on by itself, and its xsession script is what dragged in
+  # feh, imlib2 and a printing Ghostscript), and gtk.iconCache.enable, whose
+  # default is literally `config.services.xserver.enable`.
+  # tests/appliance-split.nix asserts the outcomes, so that this stays one
+  # switch and not four.
+  services.xserver.enable = lib.mkForce false;
 
   # ~770 MiB: Mesa and the LLVM it carries for llvmpipe.  Hyper-V has no GPU
   # to drive, and Spotify is a CEF application that ships its own software
@@ -56,11 +86,6 @@ lib.mkIf (config.qubix.mode == "prod") {
   xdg.mime.enable = lib.mkForce false;
   xdg.icons.enable = lib.mkForce false;
   xdg.sounds.enable = lib.mkForce false;
-
-  # gtk.iconCache keys off services.xserver.enable rather than off xdg.icons,
-  # so with the icon theme gone its post-build hook runs `find` over a
-  # share/icons that no longer exists and fails the system-path build.
-  gtk.iconCache.enable = lib.mkForce false;
 
   # ~60 MiB: the default set is DejaVu, FreeFont, Gyre, Liberation, Unifont and
   # Noto Color Emoji.  This appliance renders Latin, Cyrillic and the emoji

@@ -10,10 +10,10 @@
   spotibox = {
     # `nix path-info -S` of
     # nixosConfigurations.spotibox.config.system.build.toplevel.
-    measuredBytes = 1593908096;
+    measuredBytes = 1583136984;
 
     # CI fails above this: the measurement plus 2% of headroom.
-    maxBytes = 1625786257;
+    maxBytes = 1614799723;
 
     # What the numbers above were measured against.
     nixosVersion = "25.11.20260501.26ef669";

@@ -7,25 +7,32 @@ lib.mkIf (config.qubix.gui == "openbox") {
   # Minimal X11 desktop stack.  Openbox is enough to host Spotify and, on debug
   # images, an emergency terminal, without dragging a full desktop environment
   # into the appliance.  openbox itself reaches systemPackages through
-  # services.xserver.windowManager.openbox.enable, so this profile adds nothing
-  # to a production image.
+  # services.xserver.windowManager.openbox.enable, which is a module of its own
+  # and does not depend on services.xserver.enable - which matters, because
+  # production forces the X server module off entirely and lets xrdp start Xorg
+  # on its own terms.  See profiles/modes/prod.nix for what that costs and what
+  # it saves; debug images keep the stock module and the greeter below.
   services.xserver.enable = true;
   services.xserver.windowManager.openbox.enable = true;
 
-  # A greeter is only useful on an image somebody logs into locally.  Production
-  # images drop LightDM entirely; see profiles/modes/prod.nix.
-  services.xserver.displayManager.lightdm.enable = lib.mkDefault true;
+  # A greeter is only useful on an image somebody logs into locally, and it is
+  # the X server module that would run it.  Production forces that module off,
+  # and LightDM asserts that it is on, so the greeter has to follow the module
+  # rather than be switched off a second time next to it.
+  services.xserver.displayManager.lightdm.enable =
+    lib.mkDefault config.services.xserver.enable;
 
   # Remote sessions get a bare Openbox unless an app profile overrides this.
   qubix.session.command = lib.mkDefault "${pkgs.openbox}/bin/openbox-session";
 
   # The emergency terminal is a debugging tool, not part of the product: in the
   # kiosk session Spotify covers the root window, so the Openbox menu that would
-  # launch it is unreachable anyway.  Keeping xterm out of production images
-  # also keeps its dependencies out of the closure - and NixOS's X server module
-  # installs it on its own, so that takes an exclusion rather than just not
-  # asking for it.  tests/appliance-split.nix is what noticed.
-  services.xserver.excludePackages = lib.optionals (!debug) [ pkgs.xterm ];
+  # launch it is unreachable anyway.  There used to be a
+  # services.xserver.excludePackages entry here, because NixOS's X server module
+  # installs xterm whether or not anybody asked for it; production no longer
+  # evaluates that module at all, so the exclusion had nothing left to exclude.
+  # system.forbiddenDependenciesRegexes in profiles/modes/prod.nix is what keeps
+  # xterm from coming back by another route.
 
   # xterm's compiled-in default is the bitmap "fixed" font in ISO-8859-1, which
   # carries no Cyrillic (or any non-latin) glyphs, so typing Russian over RDP

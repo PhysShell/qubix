@@ -291,8 +291,9 @@ already exists (Docker, a lab switch), reuse it or switch spotibox to DHCP.
 ## Validation
 
 ```bash
-nix flake check --no-build                                   # every system, the VM test, the prod/debug split
+nix flake check --no-build                                   # every system, both VM tests, the prod/debug split
 nix build .#checks.x86_64-linux.spotibox-basic               # boots the appliance in QEMU
+nix build .#checks.x86_64-linux.spotibox-xrdp-session        # starts a real xrdp session in it
 tools/closure.sh report                                      # what the production image is made of
 tools/closure.sh diff                                        # what the debug image adds on top of it
 tools/closure.sh why cups                                    # who is still holding on to a store path
@@ -446,7 +447,8 @@ purpose NixOS box. Measured with `tools/closure.sh` against nixpkgs 25.11:
 | xterm, pavucontrol, alsa-utils, man-db, docs, installer tools, `environment.defaultPackages` | -160 MiB |
 | the display-manager layer: LightDM, the NixOS xsession script, feh, Ghostscript | -84 MiB |
 | an OpenSSH client, BIND's `host`, and the rest of `corePackages` | -38 MiB |
-| **production total** | **1.48 GiB (-61.2%)**, 1024 store paths down to 706 |
+| the rest of NixOS's X server module (see below) | -10 MiB |
+| **production total** | **1.47 GiB (-61.4%)**, 1024 store paths down to 666 |
 
 Three of those were never asked for by anything in the appliance:
 
@@ -481,6 +483,69 @@ channel unless told otherwise, and the upstream Hyper-V module never tells it:
 make-disk-image itself with `copyChannel = false` for production images, taking
 another ~186 MiB of Nix expressions out of the VHDX - a second copy of the tree
 the registry was already pinning. `tools/closure.sh check` fails if it returns.
+
+### The X Server Nobody Configures
+
+The appliance runs X11, so `services.xserver.enable = true` looked like a load
+bearing line. It was not. xrdp starts one X server per session, and it starts
+it from its own `sesman.ini`, with a command line that nixpkgs bakes into the
+xrdp package at build time:
+
+    [Xorg]
+    param=/nix/store/...-xorg-server-21.1.22/bin/Xorg
+    param=-modulepath
+    param=/nix/store/...-xorgxrdp-0.10.4/lib/xorg/modules,...
+    param=-config
+    param=/nix/store/...-xorgxrdp-0.10.4/etc/X11/xrdp/xorg.conf
+
+NixOS's generated `/etc/X11/xorg.conf` is not in that list, and neither is
+`display-manager.service`. The upstream module says so in one comment - "xrdp
+can run X11 program even if `services.xserver.enable = false`" - and that is
+the whole of the documentation. So production turns the module off, and what
+leaves is the part of it that was only ever furniture for a desktop:
+
+- the input driver stack: `xf86-input-libinput`, `xf86-input-evdev`,
+  `libinput`, `libwacom` and the Python environment `libwacom` carries.
+  xorgxrdp's `xorg.conf` sets `AutoAddDevices off` and declares `xrdpkeyb` and
+  `xrdpmouse` as its only input devices, so none of it was ever loaded - there
+  is no keyboard and no tablet on the other end of an RDP connection, only a
+  protocol.
+- the core bitmap fonts `font-misc-misc`, `font-cursor-misc` and `font-alias`.
+  Nothing here sets a `FontPath`, so `xset q` on a live session reports the
+  font path as exactly `built-ins` - the font path element compiled into
+  libXfont2, which is where `fixed` and `cursor` come from. Those three
+  packages were indexed by fontconfig and then ignored by it.
+- `xrandr`, `xrdb` and its C preprocessor `mcpp`, `xset`, `xinput`, `xprop`,
+  `xlsclients`, `iceauth`, `x11-ssh-askpass`: X utilities, in an image whose
+  production session has no terminal to type them into.
+- `display-manager.service` itself. `services.displayManager.enable` had been
+  forced off for several commits already, but the unit is declared by the X
+  server module rather than by the display-manager one, so what shipped until
+  now was a greeter unit with an empty `ExecStart`.
+
+Three forced-off options went with it, because all three were downstream of
+this one: LightDM, `services.displayManager.enable`, and `gtk.iconCache.enable`
+- whose default is literally `config.services.xserver.enable`. One switch
+instead of four, and `tests/appliance-split.nix` asserts the outcomes so it
+stays that way.
+
+`services.xserver.displayManager.lightdm.enable` had to move rather than
+disappear: LightDM asserts that the X server is on, and
+`profiles/gui/openbox.nix` was asking for a greeter unconditionally. It now
+follows `services.xserver.enable`, which is what it meant all along.
+
+Ten MiB is not much next to Mesa, and this is the change that most deserved a
+test rather than a build. "It evaluates" proves nothing about an X server
+started by a daemon from a config file NixOS never reads.
+`tests/xrdp-session.nix` therefore asks xrdp for a real session with
+`xrdp-sesrun` - xrdp's own session starter, speaking the same SCP protocol to
+`sesman` that the RDP listener does - and then checks, on that session's
+display, that Xorg answers, that the font path is `built-ins`, that the
+`us,ru` layout and the Win+Space toggle from `profiles/remote/xrdp.nix` took,
+that Openbox owns the root window, and that the Spotify window is up and
+maximised. The X clients in it run as `rdp` with the session's own
+`Xauthority`, because `sesman` starts Xorg with `-auth` and root cannot open
+that display.
 
 ### The Disk Was Sized For A Fear, Not A Measurement
 
@@ -750,7 +815,8 @@ tools/
   update-manifest.sh
   closure.sh               closure census and budget (report/diff/why/check/baseline)
 tests/
-  spotibox-basic.nix       NixOS VM test
+  spotibox-basic.nix       NixOS VM test: what the image contains
+  xrdp-session.nix         NixOS VM test: a real xrdp session, X, keyboard, kiosk
   appliance-split.nix      evaluation-only guard for the prod/debug split
   closure-budget.nix       recorded production closure budget, enforced by CI
   qubixctl.Tests.ps1       controller unit checks
