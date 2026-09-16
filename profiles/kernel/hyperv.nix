@@ -154,6 +154,78 @@ lib.mkIf (config.qubix.kernel == "hyperv") {
         ATA = yes;
         ATA_PIIX = option yes;
         SATA_AHCI = yes;
+
+        # --- Stage two: whole families this machine cannot have ---------------
+        # Not "drivers we did not see loaded".  Each line below is a class of
+        # hardware or a subsystem that a Hyper-V generation 2 guest running one
+        # kiosk application has no way to encounter, and each one costs
+        # megabytes because nixpkgs' common config or the architecture default
+        # switches it on for machines that are not this one.
+        #
+        # Sound is the one that looks wrong and is not.  This appliance plays
+        # music, but not through a sound card: mstsc negotiates audio over RDP,
+        # xrdp-chansrv hands it to PulseAudio through a unix socket, and
+        # module-xrdp-sink never opens a device.  Checked on a running kiosk
+        # with Spotify up: /proc/asound does not exist and not one snd module
+        # is loaded.
+        SOUND = no;
+        SND = no;
+
+        # No radios of any kind, and nothing to switch them off with.
+        WLAN = no;
+        CFG80211 = no;
+        MAC80211 = no;
+        RFKILL = no;
+        BT = no;
+        NFC = no;
+        HAMRADIO = lib.mkForce no;
+        CAN = no;
+
+        # No capture hardware, no remote controls.  RC_CORE is switched on by
+        # nixpkgs' common config for desktops with IR receivers.
+        MEDIA_SUPPORT = no;
+        RC_CORE = lib.mkForce no;
+
+        # GPUs.  The DRM core stays - DRM_HYPERV is the console, see above -
+        # but every driver for a physical card goes, and x86_64's default
+        # config builds i915 into the kernel.
+        DRM_I915 = no;
+        DRM_AMDGPU = no;
+        DRM_RADEON = no;
+        DRM_NOUVEAU = no;
+        DRM_GMA500 = lib.mkForce no;
+        DRM_VMWGFX = no;
+        DRM_QXL = no;
+        # DRM_BOCHS and DRM_VIRTIO_GPU are required above: tools/cold-boot.sh
+        # screendumps the console to find out why a boot failed, and a boot
+        # nobody can look at is a boot nobody can fix.
+
+        # Every driver for a physical network card.  x86_64's default config
+        # builds a dozen of them in; this machine's NIC is hv_netvsc, and the
+        # test VMs' is virtio_net, and neither lives under this menu.
+        ETHERNET = no;
+        WIRELESS = no;
+
+        # Buses that do not exist on a synthetic machine.
+        FIREWIRE = no;
+        THUNDERBOLT = no;
+        INFINIBAND = lib.mkForce no;
+        PARPORT = no;
+        BLK_DEV_FD = no;
+
+        # This appliance is a guest.  It does not host anything.
+        VIRTUALIZATION = no;
+
+        # Filesystems with no mount point here.  9p, erofs, overlay, ext4 and
+        # vfat are required above; these are the rest of the menu.
+        XFS_FS = no;
+        BTRFS_FS = no;
+        NFS_FS = lib.mkForce no;
+        NFSD = no;
+        CIFS = no;
+
+        # Android's IPC layer, in a music player.
+        ANDROID_BINDER_IPC = lib.mkForce no;
       };
     }
   );

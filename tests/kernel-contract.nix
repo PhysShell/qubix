@@ -97,8 +97,61 @@ let
   };
 
   # Absent: hardware or subsystems this machine cannot have.  One line each,
-  # and each one has to be a decision somebody could argue with.
-  absent = { };
+  # and each one has to be a decision somebody could argue with - this is a
+  # list of arguments, not an inventory of Kconfig.
+  absent = {
+    # The one that looks wrong and is not.  This appliance plays music, but
+    # never through a sound card: mstsc negotiates audio over RDP,
+    # xrdp-chansrv hands it to PulseAudio over a unix socket, and
+    # module-xrdp-sink opens no device.  Checked on a running kiosk with
+    # Spotify up: /proc/asound does not exist and no snd module is loaded.
+    SOUND = "audio goes over RDP, not through a sound card";
+    SND = "the same, one layer down";
+
+    # No radios, and nothing to switch them off with.
+    WLAN = "a virtual machine has no wireless card";
+    CFG80211 = "the stack behind the card it does not have";
+    MAC80211 = "and the layer behind that";
+    BT = "no Bluetooth controller on a VMBus";
+    NFC = "no NFC reader either";
+    CAN = "no CAN bus in a music player";
+    HAMRADIO = "nixpkgs turns this on for desktops; this is not one";
+
+    # No capture hardware, no infrared remote.
+    MEDIA_SUPPORT = "no webcam, no tuner, no capture card";
+    RC_CORE = "nixpkgs turns it on for desktops with IR receivers";
+
+    # Every driver for a physical GPU.  The DRM core stays - DRM_HYPERV is the
+    # console and is required above - but x86_64's default config builds i915
+    # into the kernel, on a machine Hyper-V gives no GPU to at all.
+    DRM_I915 = "no Intel GPU";
+    DRM_AMDGPU = "no AMD GPU";
+    DRM_RADEON = "no Radeon";
+    DRM_NOUVEAU = "no NVIDIA";
+
+    # Buses a synthetic machine does not have.
+    FIREWIRE = "no FireWire";
+    THUNDERBOLT = "no Thunderbolt";
+    INFINIBAND = "no InfiniBand";
+    PARPORT = "no parallel port";
+    BLK_DEV_FD = "no floppy drive";
+
+    # Every driver for a physical NIC.  This machine's is hv_netvsc and the
+    # test VMs' is virtio_net; neither is under this menu.
+    ETHERNET = "no physical network card";
+
+    # This appliance is a guest.  It does not host anything.
+    VIRTUALIZATION = "nothing runs virtual machines inside the appliance";
+
+    # Filesystems with no mount point here.  ext4, vfat, erofs, overlay and 9p
+    # are required above; this is the rest of the menu.
+    XFS_FS = "nothing is formatted xfs";
+    BTRFS_FS = "nothing is formatted btrfs";
+    NFS_FS = "nothing is mounted over NFS";
+    CIFS = "nothing is mounted over SMB";
+
+    ANDROID_BINDER_IPC = "Android's IPC layer, in a music player";
+  };
 
   configOf = cfg: cfg.boot.kernelPackages.kernel.configfile;
 

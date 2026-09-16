@@ -454,7 +454,8 @@ purpose NixOS box. Measured with `tools/closure.sh` against nixpkgs 25.11:
 | `growpart`, on a disk the controller never resizes | -1 MiB |
 | `lsvmbus`, and with it the last Python interpreter (see below) | -108 MiB |
 | a kernel built for one machine instead of for all of them (see below) | -118 MiB |
-| **production total** | **1.15 GiB (-69.9%)**, 1024 store paths down to 583 |
+| the subsystems that machine cannot have: sound, radios, GPUs, KVM | -7 MiB |
+| **production total** | **1.15 GiB (-70.0%)**, 1024 store paths down to 584 |
 
 Three of those were never asked for by anything in the appliance:
 
@@ -614,17 +615,29 @@ and `kernelPreferBuiltin = true`, so unanswered questions fall back to the
 architecture default instead of becoming modules, and what remains is compiled
 in rather than loaded:
 
-| | stock | this |
-| --- | --- | --- |
-| modules tree | 126.2 MiB | 3.7 MiB |
-| kernel | 19.8 MiB | 29.1 MiB |
-| initrd | 24.4 MiB | 22.0 MiB |
-| **total** | **170.4 MiB** | **54.8 MiB** |
+| | stock | stage one | stage two |
+| --- | --- | --- | --- |
+| modules tree | 126.2 MiB | 3.7 MiB | 1.7 MiB |
+| kernel | 19.8 MiB | 29.1 MiB | 23.8 MiB |
+| initrd | 24.4 MiB | 22.0 MiB | 22.0 MiB |
+| **total** | **170.4 MiB** | **54.8 MiB** | **47.5 MiB** |
 
-The kernel image grows because the drivers moved into it. That is the trade,
-and it is a good one at this ratio - but it is also why stage two, which
-removes whole subsystems, matters more than it looks: every driver cut now
-comes straight out of the `bzImage`.
+The kernel image grows in stage one because the drivers moved into it. That is
+the trade, and it is a good one at this ratio - it is also why stage two
+matters more than its 7 MiB suggests: every driver cut there comes straight
+out of the `bzImage`, which is loaded into RAM on every boot.
+
+Stage two removes families rather than drivers: sound, every radio, every
+physical GPU, capture hardware and infrared, FireWire, Thunderbolt,
+InfiniBand, the parallel port, the floppy controller, every physical NIC
+driver, KVM, four filesystems with no mount point here, and Android's binder.
+Each one is a line in `tests/kernel-contract.nix` with the argument for it, so
+the list stays something a person can read rather than a second copy of
+Kconfig. Sound is the one that looks wrong: this appliance plays music, but
+never through a sound card - mstsc negotiates audio over RDP, `xrdp-chansrv`
+hands it to PulseAudio over a unix socket, and `module-xrdp-sink` opens no
+device. Checked on a running kiosk with Spotify up: `/proc/asound` does not
+exist and not one `snd` module is loaded.
 
 **What the appliance is not allowed to lose** is stated explicitly, and the
 list is longer than "Hyper-V". `system.etc.overlay` made `overlayfs` and
