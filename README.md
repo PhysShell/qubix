@@ -445,7 +445,8 @@ purpose NixOS box. Measured with `tools/closure.sh` against nixpkgs 25.11:
 | the nixpkgs sources pinned into `/etc/nix/registry.json` and `NIX_PATH` | -186 MiB |
 | xterm, pavucontrol, alsa-utils, man-db, docs, installer tools, `environment.defaultPackages` | -160 MiB |
 | the display-manager layer: LightDM, the NixOS xsession script, feh, Ghostscript | -84 MiB |
-| **production total** | **1.52 GiB (-60.2%)**, 1024 store paths down to 727 |
+| an OpenSSH client, BIND's `host`, and the rest of `corePackages` | -38 MiB |
+| **production total** | **1.48 GiB (-61.2%)**, 1024 store paths down to 706 |
 
 Three of those were never asked for by anything in the appliance:
 
@@ -480,6 +481,28 @@ channel unless told otherwise, and the upstream Hyper-V module never tells it:
 make-disk-image itself with `copyChannel = false` for production images, taking
 another ~186 MiB of Nix expressions out of the VHDX - a second copy of the tree
 the registry was already pinning. `tools/closure.sh check` fails if it returns.
+
+### The Disk Was Sized For A Fear, Not A Measurement
+
+`virtualisation.diskSize` said 30 GiB, with the comment `Need 30 GB o_O`. With
+the closure at 1.5 GiB, the candidates measure like this - ext4 metadata from
+`mkfs.ext4` on an image of each size, free space after installing the system,
+and the journal cap systemd derives from the filesystem (10%, capped at 4 GiB):
+
+| Disk | ext4 metadata | Free after the system | Journal cap |
+| --- | --- | --- | --- |
+| 4 GiB | 145 MiB | 2431 MiB | 410 MiB |
+| 6 GiB | 186 MiB | 4438 MiB | 614 MiB |
+| **8 GiB** | **231 MiB** | **6441 MiB** | **819 MiB** |
+| 30 GiB | 656 MiB | 28544 MiB | 3072 MiB |
+
+A dynamic VHDX does not allocate the virtual size up front - a freshly
+formatted image is 68 MiB at 4 GiB and 135 MiB at 30 - but ext4 writes its
+inode tables lazily after the first mount, so the 30 GiB filesystem does
+eventually claim its 656 MiB. The other half of the argument is the journal:
+at 30 GiB systemd is willing to keep 3 GiB of logs on a machine whose entire
+system is 1.5 GiB. 8 GiB is four times the image with the log cap at a sane
+819 MiB, so that is what it is now.
 
 Debug images keep every bit of it, plus ssh, strace, an xterm and a mixer. The
 switch is `qubix.mode`, and `machines/spotibox-debug.nix` is still three lines.
@@ -520,6 +543,27 @@ modules (126 MiB), a python3 (107 MiB) that four separate things need
 (`hyperv-daemons`, `cloud-utils` for `growPartition`, the systemd-boot
 generation builder and glib's `gdbus-codegen`), systemd, and the
 GTK3/Xorg/xrdp/PulseAudio path the appliance exists to run.
+
+`environment.corePackages` is now an allowlist rather than NixOS's set of
+"core packages for a normal interactive system". Two upstream modules add to
+that set unconditionally and offer no way to refuse -
+`nixos/modules/programs/ssh.nix` contributes an OpenSSH client to a machine
+whose sshd is forced off, and `nixos/modules/tasks/network-interfaces.nix`
+contributes BIND's `host` to one with static resolvers - so the list is
+replaced with what something on this image can still reach through
+`/run/current-system/sw/bin`. Not busybox: the scripts that survive expect GNU
+semantics, and swapping the implementation to save a few megabytes is how you
+get a bug report six months later about a flag that quietly means something
+else.
+
+That also answered the `nix.enable` question from earlier in this file. It is
+worth 9 MiB, not the 49 the nix closure suggests, because the systemd-boot
+generation builder interpolates `${config.nix.package}/bin/nix-env` and keeps
+the package alive regardless. What actually leaves is the daemon, its socket,
+and the OpenSSH client that was on nix-daemon's `PATH` for remote builds. The
+one step this branch cannot verify is `switch-to-configuration boot` inside
+make-disk-image, which needs KVM; if it minds, it will say so at image build
+rather than at the user's.
 
 `tools/closure.sh roots` ranks the system packages by *added size* - what
 actually leaves the closure if that one package is dropped, which is the only

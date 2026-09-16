@@ -79,6 +79,14 @@ lib.mkIf (config.qubix.mode == "prod") {
   # The appliance's user list is what the image says it is.
   users.mutableUsers = false;
 
+  # No package manager in a machine that cannot rebuild itself.  This is worth
+  # exactly 9 MiB and not the 49 the nix closure suggests: the systemd-boot
+  # generation builder interpolates ${"$"}{config.nix.package}/bin/nix-env, so the
+  # package stays whatever this says.  What does leave is the daemon, its
+  # socket, and the OpenSSH client that was only there because nix-daemon
+  # carries ssh on its PATH for remote builds.
+  nix.enable = false;
+
   # ~700 MB of speech synthesis.  services/misc/graphical-desktop.nix turns
   # speech-dispatcher on for anything with a graphical session ("default
   # guessed conservatively", says the module), and speech-dispatcher pulls in
@@ -131,6 +139,48 @@ lib.mkIf (config.qubix.mode == "prod") {
     "pavucontrol"
     "xterm"
   ];
+
+  # environment.corePackages calls itself "core packages for a normal
+  # interactive system", and that is exactly what this is not.  Two upstream
+  # modules add to it unconditionally, with no option to refuse:
+  # programs/ssh.nix contributes an OpenSSH client to a machine whose sshd is
+  # forced off, and tasks/network-interfaces.nix contributes BIND's `host` to
+  # one with static resolvers.  So the list is replaced rather than filtered.
+  #
+  # What stays is what something on this image can still call through
+  # /run/current-system/sw/bin: the shell users log into, the GNU text and file
+  # utilities system scripts assume, login/su from shadow, the process and
+  # mount tools, and ip.  Everything a systemd unit runs is an absolute store
+  # path and does not depend on this list at all.
+  #
+  # Deliberately not busybox: the scripts that survive here expect GNU
+  # semantics, and swapping the implementation to save a few megabytes is how
+  # you get a bug report six months later about an option that silently means
+  # something else.
+  environment.corePackages = lib.mkForce (with pkgs; [
+    bashInteractive
+    coreutils
+    findutils
+    gnugrep
+    gnused
+    gawk
+    util-linux
+    procps
+    shadow
+    iproute2
+    # 100 KiB, and the first thing the smoke test called after boot.  The
+    # allowlist is for things that cost megabytes, not for winning arguments
+    # about whether anyone still types hostname(1).
+    hostname-debian
+    getent
+    getconf
+    acl
+    attr
+    libcap
+    ncurses
+    which
+    stdenv.cc.libc
+  ]);
 
   # NixOS's "interactive system" convenience set: perl, rsync, strace.
   environment.defaultPackages = lib.mkForce [ ];

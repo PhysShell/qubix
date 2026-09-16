@@ -17,8 +17,14 @@
 
   networking.hostName = "spotibox";
 
-  # Spotify + GUI require more space than the default 8 GB disk. Need 30 GB o_O
-  virtualisation.diskSize = 30 * 1024;
+  # Measured rather than guessed, now that the closure is 1.5 GiB: an 8 GiB
+  # root leaves 6.4 GiB free after the system, against 2.4 GiB at 4 GiB and
+  # 28.5 GiB at the old 30.  The virtual size is not free even on a dynamic
+  # VHDX - ext4's inode tables are written lazily after first mount, so a
+  # 30 GiB filesystem eventually allocates ~656 MiB of metadata against
+  # ~231 MiB here - and systemd sizes the journal at 10% of the filesystem,
+  # which is 3 GiB of logs at 30 GiB and 819 MiB at 8.
+  virtualisation.diskSize = 8 * 1024;
 
   qubix = {
     mode = "prod";

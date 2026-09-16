@@ -144,6 +144,21 @@ let
         + "setNixPath = ${lib.boolToString prod.nixpkgs.flake.setNixPath}";
     }
     {
+      name = "prod: no package manager, and no ssh client behind it";
+      # nix-daemon carries an OpenSSH client on its PATH for remote builds,
+      # which is how a sealed appliance ends up with one.
+      ok = !prod.nix.enable
+        && !(lib.any (n: n == "openssh") (names prod));
+      detail = "nix.enable = ${lib.boolToString prod.nix.enable}";
+    }
+    {
+      name = "prod: corePackages is an allowlist, not the interactive set";
+      ok =
+        let n = map getName prod.environment.corePackages;
+        in !(lib.any (x: lib.elem x n) [ "openssh" "bind" "curl" "coreutils-full" ]);
+      detail = "corePackages: ${concatStringsSep " " (map getName prod.environment.corePackages)}";
+    }
+    {
       name = "prod: no sshd";
       ok = !prod.services.openssh.enable;
       detail = "services.openssh.enable is on";
