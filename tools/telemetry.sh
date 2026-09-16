@@ -42,16 +42,36 @@ release=$(nix build --no-link --print-out-paths .#spotibox-release)
 vhdx=$(find -L "$image" -name '*.vhdx' -print -quit)
 test -n "$vhdx" || { echo "no .vhdx in $image" >&2; exit 1; }
 
+# Own NAR size of the closure paths whose *name* matches, with the number of
+# paths that may match stated up front.
+#
+# Two lessons are baked in here.  The name and not the path, because
+# `-linux-6.12.85$` also matches `...-initrd-linux-6.12.85`, which is how the
+# first version of this counted the initrd twice and reported a 46 MiB kernel.
+# And an exact count, because after that there is no reason left to trust
+# store naming on its own: a classifier that silently matches nothing reports
+# zero bytes and looks like an improvement, and one that silently matches an
+# extra path looks like a regression.  Either way the number is wrong and
+# nobody finds out.  If nixpkgs changes the shape of these paths, this stops
+# the release and prints what it found.
 nar_of() {
-  # Own NAR size of the closure paths whose *name* matches, 0 if none.  The
-  # name, not the path: `-linux-6.12.85$` also matches
-  # `...-initrd-linux-6.12.85`, which is how the first version of this counted
-  # the initrd twice and reported a 46 MiB kernel.
-  nix path-info -rs "$toplevel" |
-    awk -v pat="$1" '
+  local pat="$1" want="$2" found
+  found=$(nix path-info -rs "$toplevel" |
+    awk -v pat="$pat" '
       { name = substr($1, length("/nix/store/") + 34) }
-      name ~ pat { sum += $2 }
-      END { print sum + 0 }'
+      name ~ pat { print $1 "\t" $2 }')
+
+  local n
+  n=$(printf '%s' "$found" | grep -c . || true)
+  if [ "$n" != "$want" ]; then
+    {
+      echo "telemetry.sh: /$pat/ matched $n closure paths, expected $want."
+      echo "The store layout changed, or the pattern is wrong.  Matched:"
+      printf '%s\n' "$found" | sed 's|^|  |'
+    } >&2
+    exit 1
+  fi
+  printf '%s' "$found" | awk -F'\t' '{ sum += $2 } END { print sum + 0 }'
 }
 
 version=$(nix eval --raw .#nixosConfigurations.spotibox.config.system.nixos.label)
@@ -63,9 +83,23 @@ git diff --quiet HEAD 2>/dev/null || rev="$rev-dirty"
 
 closure_bytes=$(nix path-info -S "$toplevel" | awk '{ print $2 }')
 closure_paths=$(nix path-info -r "$toplevel" | wc -l)
-kernel_bytes=$(nar_of '^linux-[0-9][^-]*$')
-modules_bytes=$(nar_of '^linux-[0-9][^-]*-modules')
-initrd_bytes=$(nar_of '^initrd-linux-')
+# The counts are part of the contract.  Three trees of kernel modules ship,
+# and the count is here so that nobody has to remember why:
+#
+#   linux-<v>-modules         the kernel's own tree, and nearly all the bytes
+#   linux-<v>-modules         352 bytes of symlink farm, which is what
+#                             aggregateModules builds to merge in
+#                             boot.extraModulePackages - of which this image
+#                             has none
+#   linux-<v>-modules-shrunk  the subset make-initrd copies into the initrd
+#
+# An earlier version of this line had no `$` and counted the first two; the
+# one before that had no count at all and quietly folded in the initrd.  Both
+# looked like a size change rather than a measurement bug, which is the whole
+# argument for stating how many paths a classifier is allowed to match.
+kernel_bytes=$(nar_of '^linux-[0-9][^-]*$' 1)
+modules_bytes=$(nar_of '^linux-[0-9][^-]*-modules' 3)
+initrd_bytes=$(nar_of '^initrd-linux-' 1)
 vhdx_apparent=$(stat -L -c %s "$vhdx")
 vhdx_allocated=$(( $(stat -L -c %b "$vhdx") * $(stat -L -c %B "$vhdx") ))
 release_bytes=$(stat -L -c %s "$release/spotibox.vhdx.gz")

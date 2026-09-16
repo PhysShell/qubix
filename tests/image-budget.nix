@@ -9,7 +9,7 @@
   spotibox = {
     # What the numbers below were measured against.
     nixosVersion = "hyperv-25.11.20260501.26ef669";
-    rev = "75a1d08617445a10b4a02676b6dfe7cd02d60ae4-dirty";
+    rev = "36a369e42eb67a2465374ff6b00b9b437522f321-dirty";
 
     closureBytes = { measured = 1222807776; max = 1283948164; };
     closurePaths = { measured = 579; max = 607; };

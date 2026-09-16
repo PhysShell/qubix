@@ -245,8 +245,29 @@ them:
   static IP. That fallback has never been watched working on a build where the
   other two daemons are gone.
 
-The script also finishes with a second cold boot, because a shutdown that
-corrupted the root filesystem shows up there and nowhere else.
+The script finishes with a second cold boot, because a shutdown that
+corrupted the root filesystem shows up there and nowhere else, and it checks
+that the guest came back on the *same* static address both times - a cheap
+check that catches persistent network state going strange across a
+shutdown/hot-add cycle.
+
+Three things it deliberately does not do. It never rescues a failed shutdown
+with `Stop-VM -Force`: the VM is left running and the run ends FAIL, because
+forcing it off would delete the only evidence of the failure the check exists
+to find. It never accepts an open TCP port as proof of xrdp - it sends an
+X.224 connection request and insists on a TPKT reply, the same handshake
+`tools/cold-boot.sh` uses. And it never asserts that the host can see *some*
+address: it waits for the expected one, ignoring IPv6 and link-local, because
+a guest answering with an address it invented itself proves nothing about the
+static configuration.
+
+Everything is timed, and `-ReportPath` writes the evidence out: image
+revision, Hyper-V host and OS build, VM generation and configuration version,
+the memory hot-add as a time series of assigned and demanded megabytes, a
+result and a duration per check, and a verdict. Keep it with the release.
+A hot-add that takes 55 seconds instead of 4 after some future Hyper-V or
+kernel update is exactly the kind of degradation that creeps in quietly, and
+there is no way to notice it without the earlier number to compare against.
 
 ## Publishing A Release
 
@@ -1091,6 +1112,27 @@ tests/
 
 ## TODO / Later Goals
 
+Closure work below this line is *post-baseline*: it belongs in its own branch
+and its own pull request, measured and accepted on its own, and it does not
+touch the production image until it has been. The image as it stands has an
+evidence trail - see *Release Readiness* - and the next 20 MiB is not worth
+spending that. If it turns out that saving 23 MiB of language tables costs a
+three-storey GTK override to carry forever, the right answer is no, and having
+the experiment in a separate branch is what makes saying no cheap.
+
+- `alsa-plugins` pulls a full ffmpeg 8 (32 MiB) into an appliance that already
+  carries ffmpeg 4 for Spotify, and the production audio path never touches
+  the ALSA device layer at all - traced on a running kiosk, no `snd` module is
+  loaded and `/proc/asound` does not exist. The causal chain is short enough
+  to look like a clean override. Acceptance has to include Spotify playing
+  through RDP audio *after a reconnect*, because dependencies like this have a
+  habit of being unnecessary right up to the first fallback codec.
+- GTK3 pulls `iso-codes` (23 MiB) for a language list the kiosk never shows.
+  Harder: GTK may reach that data through localised country and language names
+  rather than through a visible picker, so the likely outcome is a patch to
+  carry rather than an option to set. Second, and only if the first one went
+  well.
+
 - Move the image to `image.repart` with a dm-verity-protected squashfs store
   (see *Why The Image Is ext4*). It halves what the VM occupies on the host,
   makes the system disk verifiable rather than merely disposable, and drops the
@@ -1106,9 +1148,6 @@ tests/
   opened, every decoder still present), but nothing here has logged into
   Spotify or played a track over mstsc yet. Do one cold run of each image
   before tagging a release.
-- `alsa-plugins` pulls a full ffmpeg 8 (32 MiB) into an appliance that already
-  has ffmpeg 4 for Spotify; GTK3 pulls `iso-codes` (23 MiB) for a language list
-  the kiosk never shows. Both need package overrides rather than options.
 - A Hyper-V-specific kernel. 126 MiB of the image - 9% of what is left - is
   kernel modules, for a machine with exactly one virtualised bus. The staged
   route is `buildLinux` with `autoModules = false` and `kernelPreferBuiltin`
