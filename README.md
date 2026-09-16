@@ -528,22 +528,48 @@ decision anybody made here.
 The door out is `image.repart`, NixOS's systemd-repart image module. It takes
 any filesystem systemd-repart can format (btrfs, erofs, squashfs, xfs), and
 `image.repart.verityStore` ships the appliance shape directly: a tmpfs root, a
-compressed erofs `/nix/store` under dm-verity, and a UKI on the ESP. Built as
-an experiment against this configuration it produces a 968 MiB image - 100 MiB
-of that an oversized ESP and 54 MiB the verity hash tree - in 41 seconds, in a
-plain Nix build with no QEMU and no KVM, which is also how the release job
-could stop needing the `/dev/kvm` dance it currently performs.
+compressed erofs `/nix/store` under dm-verity, and a UKI on the ESP. Built
+against this configuration as an experiment it produces the image in tens of
+seconds, in a plain Nix build with no QEMU and no KVM - which is also how the
+release job could stop needing the `/dev/kvm` dance it currently performs.
+
+That image was booted under OVMF to see whether the shape actually works, and
+it does: firmware to UKI, dm-verity set up from the `usrhash=` on the kernel
+command line, `/nix/store` mounted read-only off `/dev/mapper/usr`, root on
+tmpfs, `multi-user.target` reached with **zero failed units** and xrdp and
+xrdp-sesman both active and listening on 3389.
+
+It also found the trap. systemd-repart will cheerfully build an erofs with
+`Compression=zstd`, and the stock NixOS kernel cannot mount it:
+
+```text
+erofs: (device dm-0): z_erofs_parse_cfgs: algorithm 3 isn't enabled on this kernel
+[FAILED] Failed to mount /sysusr/usr.
+```
+
+`CONFIG_EROFS_FS_ZIP=y` but `CONFIG_EROFS_FS_ZIP_ZSTD is not set`, so the image
+builds, passes its verity check, and then drops straight into emergency mode.
+LZ4 is the only algorithm the stock kernel has. That costs ratio:
+
+| erofs store | Image |
+| --- | --- |
+| no compression | 1868 MiB |
+| `Compression=zstd` (does not mount on the stock kernel) | 968 MiB |
+| `Compression=lz4hc` (boots) | 1144 MiB |
+
+An oversized 100 MiB ESP and a 54 MiB verity hash tree are in every one of
+those numbers and both can be trimmed.
 
 Two things are worth knowing before anyone reaches for it:
 
 - **Compression does not make the download smaller. It makes it bigger.** The
   release asset is a gzip of the image, and gzip of an already-compressed
-  filesystem gains nothing: 715 MiB today, around 950 MiB compressed. What
-  halves is the space the VM occupies on the Windows host, because a dynamic
-  VHDX only allocates the blocks the filesystem actually wrote - roughly
-  1.8 GB now against roughly 0.95 GB. Whether that trade is worth taking
-  depends on whether the machine downloads once and keeps the VM, which it
-  does.
+  filesystem gains nothing: 715 MiB today against the 1144 MiB of an image that
+  boots. What shrinks is the space the VM occupies on the Windows host, because
+  a dynamic VHDX only allocates the blocks the filesystem actually wrote -
+  roughly 1.8 GB now against roughly 1.14 GB. A kernel built with
+  `EROFS_FS_ZIP_ZSTD` would move both numbers a long way (968 MiB), which is
+  probably the first thing to try if this is ever taken further.
 - Hardlink deduplication - what `nix-store --optimise` does - is not the
   missing gigabyte. Hashing every file in the closure finds 4192 duplicates
   worth 29 MiB, or 1.8%. Nix already deduplicates at the granularity that
