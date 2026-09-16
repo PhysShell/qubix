@@ -577,21 +577,47 @@ the result with `CopyBlocks=`:
 | | Image |
 | --- | --- |
 | 100 MiB ESP (repart's vfat floor) | 839 MiB |
-| **64 MiB ESP via `CopyBlocks=`** | **803 MiB** |
+| 64 MiB ESP via `CopyBlocks=` | 803 MiB |
+| **40 MiB ESP, after trimming the initrd** | **775 MiB** |
 
 That variant also builds without a privileged mount, because `CopyBlocks=`
 skips both `mkfs.vfat` and the loopback mount that populating a vfat partition
-otherwise needs. The 64 MiB ESP still has 28 MiB free next to its 34 MiB UKI,
-so the real floor is the UKI - kernel plus initrd - not the filesystem.
+otherwise needs.
+
+Below the ESP sits the UKI, and inside it the initrd, which starts at 22 MiB
+compressed out of a 34 MiB UKI. Two settings take it to 19 MiB without
+rebuilding anything: `boot.initrd.compressorArgs = [ "-19" "-T0" ]`, because
+NixOS does not compress the initrd as hard as zstd can, and
+`boot.initrd.includeDefaultModules = false` with the three storage modules this
+machine actually has. The UKI drops to 31 MiB, the ESP can then be 40 MiB, and
+the store shrinks a little too since the initrd lives in it. Total: 803 MiB
+to 775 MiB.
+
+The remaining 19 MiB is mostly not the initrd's own doing. Unpacked it is
+39 MiB, of which systemd is 15 MiB and its dependency tail - OpenSSL 8.5 MiB,
+tpm2-tss 3.2 MiB, Kerberos 1.7 MiB, curl, GMP, PCRE2 - is another 15 MiB;
+kernel modules are 1.9 MiB. Dropping that tail would take the initrd to 13 MiB
+compressed, but it is what `boot.initrd.systemd.package` is, and that defaults
+to the full `config.systemd.package`. Two things block the obvious fixes:
+
+- `pkgs.systemdMinimal` is built `withCryptsetup = false`, so it has no
+  `systemd-veritysetup` and cannot set up the store this image boots from.
+- lvm2 is not optional either. `nixos/modules/system/boot/systemd/dm-verity.nix`
+  sets `boot.initrd.services.lvm.enable = true` on purpose: device-mapper's
+  udev rules live in lvm2, and without them `/dev/mapper/usr` never appears.
+
+So a smaller initrd means a systemd built from source with a custom feature
+set, in every release, to save about 9 MiB in an 800 MiB image. The store is
+688 of those 775 MiB; that is where the next gigabyte is, if there is one.
 
 Two things are worth knowing before anyone reaches for it:
 
 - **Compression does not make the download much smaller.** The release asset is
   a gzip of the image, and gzip of an already-compressed filesystem gains
-  nothing: 715 MiB today against 803 MiB for the squashfs image. What does
+  nothing: 715 MiB today against 775 MiB for the squashfs image. What does
   shrink is the space the VM occupies on the Windows host, because a dynamic
   VHDX only allocates the blocks the filesystem actually wrote: roughly 1.8 GB
-  now against 803 MiB. The download is a wash; the footprint drops by 2.3x.
+  now against 775 MiB. The download is a wash; the footprint drops by 2.4x.
 - Hardlink deduplication - what `nix-store --optimise` does - is not the
   missing gigabyte. Hashing every file in the closure finds 4192 duplicates
   worth 29 MiB, or 1.8%. Nix already deduplicates at the granularity that
