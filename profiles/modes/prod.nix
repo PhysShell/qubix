@@ -38,6 +38,53 @@ let
   # It runs exactly once, inside the make-disk-image VM.  That VM's EFI
   # variables are not the appliance's, so --no-variables; the removable path
   # is what makes the image bootable without them.
+  # virtualisation.hypervGuest bundles two unrelated things.  One is what makes
+  # Linux work on Hyper-V at all: the VMBus drivers in the initrd, the
+  # elevator=noop kernel parameter, and udev rules that online hot-added CPUs
+  # and memory - which is how Dynamic Memory reaches the guest.  The other is
+  # Microsoft's userspace "Integration Services": three daemons and a
+  # diagnostic, and the last Python interpreter in this image lives in them.
+  #
+  # The first set is reproduced verbatim below.  The second was checked against
+  # tools/qubixctl.ps1, one daemon at a time:
+  #
+  #   hv_kvp_daemon        reports the guest's addresses to the host.  KEPT.
+  #     Get-QubixAddress falls back to `(Get-VMNetworkAdapter).IPAddresses`
+  #     for machines without a static IP - spotibox-debug is one - and
+  #     `qubixctl -Command status` prints the same field.  That channel is the
+  #     KVP daemon; without it the controller would lose a machine and the
+  #     status output would lie by omission.
+  #   hv_vss_daemon        coordinates host-side VSS snapshots.  DROPPED: the
+  #     controller runs `Set-VM -CheckpointType Disabled` deliberately, because
+  #     checkpoints fork the home disk into .avhdx chains that `recreate`
+  #     cannot clean up.  There is nothing left for it to coordinate with.
+  #   hv_fcopy_uio_daemon  implements Copy-VMFile.  DROPPED: the controller
+  #     never calls it, and files reach this appliance in its image or over
+  #     RDP.
+  #   lsvmbus              lists VMBus devices.  DROPPED: a diagnostic, in an
+  #     image whose only session is a maximised Spotify window and whose
+  #     production mode has no terminal to run it from.
+  #
+  # lsvmbus is the one that matters for size.  It is a Python script, it lives
+  # in the same output as the daemons, and after the boot loader stopped
+  # needing Nix it was the only thing left holding CPython: 107 MiB for a
+  # command nobody on this image can type.  Host-requested shutdown, timesync
+  # and heartbeat are not affected by any of this - hv_utils implements them in
+  # the kernel and calls orderly_poweroff() directly.
+  hypervDaemons =
+    config.boot.kernelPackages.hyperv-daemons.daemons.overrideAttrs (old: {
+      postFixup = (old.postFixup or "") + ''
+        rm -f "$out/bin/lsvmbus" \
+              "$out/bin/hv_vss_daemon" \
+              "$out/bin/hv_fcopy_uio_daemon"
+
+        if grep -rl --binary-files=text -e '-python3-' "$out"; then
+          echo "hyperv-daemons still references a Python interpreter (above)" >&2
+          exit 1
+        fi
+      '';
+    });
+
   installBootLoader = pkgs.writeShellScript "qubix-install-boot-loader" ''
     set -eu
     export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.gnused config.systemd.package ]}
@@ -140,6 +187,55 @@ lib.mkIf (config.qubix.mode == "prod") {
   # safety net one layer up, it costs nothing extra, and it is what would
   # notice if the partition ever did change size underneath us.
   boot.growPartition = lib.mkForce false;
+
+  # See hypervDaemons above.  The module is replaced rather than configured,
+  # because it adds its package to environment.systemPackages and its units to
+  # systemd.packages unconditionally, and neither list can be subtracted from.
+  # Everything below that is not a daemon is a verbatim copy of what the module
+  # sets, down to the name of the udev rules file so that rule ordering does
+  # not change; tests/appliance-split.nix pins the copy.
+  virtualisation.hypervGuest.enable = lib.mkForce false;
+
+  boot.initrd.kernelModules = [
+    "hv_balloon"
+    "hv_netvsc"
+    "hv_storvsc"
+    "hv_utils"
+    "hv_vmbus"
+  ];
+  boot.initrd.availableKernelModules = [ "hyperv_keyboard" ];
+  boot.kernelParams = [ "elevator=noop" ];
+
+  # Dynamic Memory and CPU hot-add arrive as udev events; without these the
+  # guest sees the new memory blocks offline and never uses them.
+  services.udev.packages = [
+    (pkgs.writeTextFile {
+      name = "hyperv-cpu-and-memory-hotadd-udev-rules";
+      destination = "/etc/udev/rules.d/99-hyperv-cpu-and-memory-hotadd.rules";
+      text = ''
+        # Memory hotadd
+        SUBSYSTEM=="memory", ACTION=="add", DEVPATH=="/devices/system/memory/memory[0-9]*", TEST=="state", ATTR{state}="online"
+
+        # CPU hotadd
+        SUBSYSTEM=="cpu", ACTION=="add", DEVPATH=="/devices/system/cpu/cpu[0-9]*", TEST=="online", ATTR{online}="1"
+      '';
+    })
+  ];
+
+  systemd.services.hv-kvp = {
+    description = "Hyper-V key-value pair (KVP) daemon";
+    wantedBy = [ "multi-user.target" ];
+    unitConfig = {
+      ConditionVirtualization = "microsoft";
+      ConditionPathExists = "/dev/vmbus/hv_kvp";
+    };
+    serviceConfig = {
+      ExecStart = "${hypervDaemons}/bin/hv_kvp_daemon -n";
+      Restart = "on-failure";
+      PrivateTmp = true;
+    };
+  };
+
 
   # See the installBootLoader script above: this is the same systemd-boot, put
   # on the ESP by a shell script instead of by a Python one that needs Nix.

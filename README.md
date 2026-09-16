@@ -452,7 +452,8 @@ purpose NixOS box. Measured with `tools/closure.sh` against nixpkgs 25.11:
 | the Python interpreter and `-dev` outputs inside openbox (see below) | -52 MiB |
 | Nix, and the Python boot-loader installer that was holding it (see below) | -52 MiB |
 | `growpart`, on a disk the controller never resizes | -1 MiB |
-| **production total** | **1.37 GiB (-64.1%)**, 1024 store paths down to 595 |
+| `lsvmbus`, and with it the last Python interpreter (see below) | -108 MiB |
+| **production total** | **1.27 GiB (-66.8%)**, 1024 store paths down to 589 |
 
 Three of those were never asked for by anything in the appliance:
 
@@ -595,6 +596,48 @@ the entry, the EFI stub loads the initrd, the root and home filesystems mount,
 the static address comes up, and xrdp answers an X.224 connection request from
 outside the VM. The NixOS VM tests cannot cover any of that: they boot with
 `-kernel`/`-initrd` and never touch an ESP.
+
+### The Last Python Was A Diagnostic
+
+With the boot loader no longer holding it, exactly one thing kept CPython in
+the image: `lsvmbus`, a Python script that lists VMBus devices. It is 4 KiB of
+Python and it was carrying a 107 MiB interpreter into an appliance whose
+production mode has no terminal to run it from.
+
+It arrives through `virtualisation.hypervGuest`, which bundles two unrelated
+things:
+
+- **The hardware contract.** VMBus drivers in the initrd (`hv_vmbus`,
+  `hv_storvsc`, `hv_netvsc`, `hv_utils`, `hv_balloon`), `hyperv_keyboard`,
+  `elevator=noop`, and udev rules that online hot-added CPUs and memory -
+  which is how Dynamic Memory reaches the guest. None of this is negotiable.
+- **Microsoft's userspace Integration Services.** Three daemons and the
+  diagnostic.
+
+The module offers no way to take one without the other: it appends to
+`environment.systemPackages` and `systemd.packages` unconditionally, and
+neither list can be subtracted from. So production replaces it - copying the
+hardware half verbatim, down to the name of the udev rules file so rule
+ordering does not change, and pinning the copy in
+`tests/appliance-split.nix` so a nixpkgs bump cannot quietly change it.
+
+The daemons were decided one at a time, against `tools/qubixctl.ps1`:
+
+| Daemon | Verdict | Evidence |
+| --- | --- | --- |
+| `hv_kvp_daemon` | **kept** | `Get-QubixAddress` falls back to `(Get-VMNetworkAdapter).IPAddresses` for machines with no static IP - `spotibox-debug` is one - and `qubixctl -Command status` prints the same field. That channel *is* the KVP daemon. |
+| `hv_vss_daemon` | dropped | The controller runs `Set-VM -CheckpointType Disabled` on purpose, because checkpoints fork the home disk into `.avhdx` chains `recreate` cannot clean up. Nothing left to coordinate with. |
+| `hv_fcopy_uio_daemon` | dropped | Implements `Copy-VMFile`; the controller never calls it. |
+| `lsvmbus` | dropped | A diagnostic, in an image with no terminal - and the last reference to Python. |
+
+Host-requested shutdown, timesync and heartbeat are not affected by any of
+this: `hv_utils` implements them in the kernel and calls `orderly_poweroff()`
+directly, with no userspace helper in the path.
+
+Note what this is *not*. `virtualisation.hypervGuest.enable = false` on its own
+would take the initrd drivers and the hot-add rules with it, and the machine
+would either not boot or quietly ignore Dynamic Memory. The switch is the
+wrong instrument; the package is the right one.
 
 ### The Partition Nobody Resizes
 
@@ -939,16 +982,17 @@ tests/
   opened, every decoder still present), but nothing here has logged into
   Spotify or played a track over mstsc yet. Do one cold run of each image
   before tagging a release.
-- `nix.enable = false` for production images (~49 MiB). Not done yet because
-  the systemd-boot generation builder calls `nix-env` by an interpolated store
-  path, so the package may well stay in the closure anyway, and the bootloader
-  step runs inside the image build - which needs KVM to test.
 - `alsa-plugins` pulls a full ffmpeg 8 (32 MiB) into an appliance that already
   has ffmpeg 4 for Spotify; GTK3 pulls `iso-codes` (23 MiB) for a language list
   the kiosk never shows. Both need package overrides rather than options.
-- Kernel profile experiments: default/latest/hardened first, custom tiny kernel
-  later. 126 MiB of the image is kernel modules, for a machine with exactly one
-  virtualised bus.
+- A Hyper-V-specific kernel. 126 MiB of the image - 9% of what is left - is
+  kernel modules, for a machine with exactly one virtualised bus. The staged
+  route is `buildLinux` with `autoModules = false` and `kernelPreferBuiltin`
+  first, then removing whole impossible subsystems (WLAN, Bluetooth, DRM,
+  media, sound hardware, SATA/NVMe, USB device classes), with `overlayfs` and
+  `vfat` treated as part of the boot contract rather than as optional
+  filesystems - `system.etc.overlay` and the ESP need them. Acceptance is
+  `tools/cold-boot.sh` plus both VM tests, not "it booted".
 - Hyper-V differencing disks for disposable runtime clones.
 - Private-repository release downloads (token-authenticated asset URLs).
 - Second backend behind the same manifest (App Sandbox / HCS) once it accepts

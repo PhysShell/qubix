@@ -190,6 +190,35 @@ let
         + "autoResize = ${lib.boolToString prod.fileSystems."/".autoResize}";
     }
     {
+      name = "prod: the Hyper-V hardware contract, without the userspace daemons";
+      # virtualisation.hypervGuest is replaced by hand in prod, so the half
+      # that matters is pinned here: if a nixpkgs bump changes what the module
+      # puts in the initrd, this rule keeps our copy from silently diverging.
+      # The daemons are a separate decision, evidenced in profiles/modes/prod.nix
+      # against tools/qubixctl.ps1: KVP stays because the controller reads the
+      # addresses it reports, VSS and fcopy go because nothing calls them, and
+      # lsvmbus goes because it is a Python script in an image with no terminal
+      # - the last thing holding CPython, worth 107 MiB.
+      ok =
+        let
+          initrd = prod.boot.initrd.kernelModules;
+          units = prod.systemd.services;
+        in
+        !prod.virtualisation.hypervGuest.enable
+        && lib.all (m: lib.elem m initrd) [
+          "hv_balloon" "hv_netvsc" "hv_storvsc" "hv_utils" "hv_vmbus"
+        ]
+        && lib.elem "hyperv_keyboard" prod.boot.initrd.availableKernelModules
+        && lib.elem "elevator=noop" prod.boot.kernelParams
+        && units ? hv-kvp
+        && !(units ? hv-vss)
+        && !(units ? hv-fcopy)
+        && debug.virtualisation.hypervGuest.enable;
+      detail = "hypervGuest = ${lib.boolToString prod.virtualisation.hypervGuest.enable}, "
+        + "initrd = ${toString prod.boot.initrd.kernelModules}, "
+        + "params = ${toString prod.boot.kernelParams}";
+    }
+    {
       name = "prod: no nixpkgs sources pinned into the system";
       # ~186 MB of Nix expressions, so that nix commands the appliance never
       # runs would resolve <nixpkgs> offline.
