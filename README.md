@@ -457,6 +457,13 @@ Three of those were never asked for by anything in the appliance:
   system-wide flake registry and `NIX_PATH`, so that `nix run nixpkgs#hello`
   works offline on the machine. The appliance runs no nix commands, and
   upstream documents the closure cost of leaving it on.
+The font trim was checked the same way the rest of this branch was: by tracing
+what the application actually opens. On the trimmed image Spotify opens
+`DejaVuSans.ttf` and `NotoColorEmoji.ttf` - plus the rest of the DejaVu family
+- and asks for nothing it cannot find. Removing six font packages is the kind
+of change that fails visually rather than loudly, so "it still boots" would not
+have been an answer.
+
 - `hardware.graphics.enable` follows a graphical session around, and it
   installs Mesa with the LLVM that llvmpipe needs. Hyper-V exposes no GPU, and
   Spotify is a CEF application that carries its own renderer: traced through a
