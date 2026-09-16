@@ -24,7 +24,11 @@ pkgs.testers.nixosTest {
     machine.succeed("command -v spotify")
     machine.succeed("command -v openbox-session")
     machine.succeed("systemctl is-enabled xrdp")
-    machine.succeed("systemctl is-enabled avahi-daemon")
+
+    # /etc is an overlayfs and the users were created by userborn: both come
+    # from dropping the Perl activation scripts.
+    machine.succeed("findmnt -no FSTYPE /etc | grep -q overlay")
+    machine.succeed("systemctl show -p Result userborn.service | grep -q success")
 
     # The xrdp session must be the Spotify kiosk session, not a bare WM.  What
     # startwm.sh names is the keyboard wrapper from profiles/remote/xrdp.nix,
@@ -50,5 +54,8 @@ pkgs.testers.nixosTest {
 
     # The kiosk session comes from xrdp; nothing greets anybody locally.
     machine.fail("systemctl is-enabled display-manager.service")
+
+    # Nothing announces itself on a network with a static address.
+    machine.fail("systemctl is-enabled avahi-daemon")
   '';
 }

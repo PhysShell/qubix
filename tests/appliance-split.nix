@@ -89,6 +89,46 @@ let
       detail = "prod and debug carry the same Spotify derivation";
     }
     {
+      name = "prod: no desktop-session bits and no Perl activation";
+      # services.graphical-desktop.enable installs xdg-utils, which is Perl,
+      # which was the last thing holding perl in the image.  The three switches
+      # below are nixpkgs' own perlless profile.
+      ok = !prod.services.graphical-desktop.enable
+        && prod.system.etc.overlay.enable
+        && prod.services.userborn.enable
+        && prod.boot.initrd.systemd.enable;
+      detail = "graphical-desktop = ${lib.boolToString prod.services.graphical-desktop.enable}, "
+        + "etc.overlay = ${lib.boolToString prod.system.etc.overlay.enable}, "
+        + "userborn = ${lib.boolToString prod.services.userborn.enable}";
+    }
+    {
+      name = "prod: the font set is chosen, not inherited";
+      # The default set is DejaVu, FreeFont, Gyre, Liberation, Unifont and Noto
+      # Color Emoji - 60 MiB.  This keeps the two that render what the kiosk
+      # shows.
+      # Xorg adds font-cursor-misc, font-misc-misc and font-alias itself and
+      # needs them, so this names the heavy half of the default set instead of
+      # counting entries.
+      ok =
+        let names = map getName prod.fonts.packages;
+        in !prod.fonts.enableDefaultPackages
+          && !(lib.any (n: lib.elem n names) [ "unifont" "freefont-ttf" "liberation-fonts" "gyre-fonts" ]);
+      detail = "fonts: ${concatStringsSep " " (map getName prod.fonts.packages)}";
+    }
+    {
+      name = "prod: nothing broadcasts on the network";
+      ok = !prod.services.avahi.enable;
+      detail = "avahi is on, for a machine with a static address and static resolvers";
+    }
+    {
+      name = "prod: the exorcised stay exorcised";
+      # system.forbiddenDependenciesRegexes fails the build if any of these
+      # comes back transitively, which a closure budget alone would not catch.
+      ok = lib.all (r: lib.elem r prod.system.forbiddenDependenciesRegexes)
+        [ "perl" "speech-dispatcher" "mbrola" "zenity" "xterm" ];
+      detail = "forbiddenDependenciesRegexes = ${toString prod.system.forbiddenDependenciesRegexes}";
+    }
+    {
       name = "prod: no speech synthesizer";
       # ~700 MB of espeak-ng, flite and MBROLA voices, switched on for every
       # graphical NixOS system by services/misc/graphical-desktop.nix.
@@ -124,6 +164,11 @@ let
       ok = debug.hardware.graphics.enable;
       detail = "hardware.graphics.enable is off in the debug image too, which "
         + "leaves nothing to compare a rendering problem against";
+    }
+    {
+      name = "debug: keeps avahi and the stock font set";
+      ok = debug.services.avahi.enable && debug.fonts.enableDefaultPackages;
+      detail = "the debug image is supposed to stay a normal NixOS box";
     }
     {
       name = "debug: keeps sshd";

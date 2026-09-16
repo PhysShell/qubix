@@ -1,4 +1,4 @@
-{ config, lib, ... }:
+{ config, lib, pkgs, ... }:
 
 # Production mode seals the machine into an appliance.  The only thing anyone
 # can reach over RDP is the kiosk session, and everything that exists purely to
@@ -41,6 +41,44 @@ lib.mkIf (config.qubix.mode == "prod") {
   # what leaves is the driver set nothing here can use.
   hardware.graphics.enable = lib.mkForce false;
 
+  # `services.graphical-desktop.enable` follows services.xserver.enable around
+  # and installs "bits and pieces required for a graphical desktop session":
+  # nixos-icons and xdg-utils.  xdg-utils is a pile of Perl scripts, and it is
+  # the only thing holding perl in this image - 62 MiB of it, activation script
+  # or no activation script.  A kiosk has no MIME associations to look up, no
+  # menu to build and no browser for xdg-open to reach.
+  services.graphical-desktop.enable = lib.mkForce false;
+
+  # The xrdp module switches all of these on for a desktop it assumes is on the
+  # other end.  There is no desktop; there is one maximised window.
+  xdg.autostart.enable = lib.mkForce false;
+  xdg.menus.enable = lib.mkForce false;
+  xdg.mime.enable = lib.mkForce false;
+  xdg.icons.enable = lib.mkForce false;
+  xdg.sounds.enable = lib.mkForce false;
+
+  # gtk.iconCache keys off services.xserver.enable rather than off xdg.icons,
+  # so with the icon theme gone its post-build hook runs `find` over a
+  # share/icons that no longer exists and fails the system-path build.
+  gtk.iconCache.enable = lib.mkForce false;
+
+  # ~60 MiB: the default set is DejaVu, FreeFont, Gyre, Liberation, Unifont and
+  # Noto Color Emoji.  This appliance renders Latin, Cyrillic and the emoji
+  # people put in playlist names.  DejaVu covers the first two - it is also
+  # what the debug xterm is pinned to - and the emoji font covers the third.
+  fonts.enableDefaultPackages = lib.mkForce false;
+  fonts.packages = [ pkgs.dejavu_fonts pkgs.noto-fonts-color-emoji ];
+
+  # Avahi is in the base security profile because "spotibox.local" makes the
+  # Default Switch tolerable when DHCP moves the address around.  This machine
+  # has a static address, a static gateway and static resolvers, so the daemon,
+  # its NSS module and its multicast hole in the firewall serve a workflow
+  # production does not have.
+  services.avahi.enable = lib.mkForce false;
+
+  # The appliance's user list is what the image says it is.
+  users.mutableUsers = false;
+
   # ~700 MB of speech synthesis.  services/misc/graphical-desktop.nix turns
   # speech-dispatcher on for anything with a graphical session ("default
   # guessed conservatively", says the module), and speech-dispatcher pulls in
@@ -65,9 +103,36 @@ lib.mkIf (config.qubix.mode == "prod") {
   documentation.enable = lib.mkDefault false;
   documentation.man.enable = lib.mkDefault false;
 
-  # NixOS's "interactive system" convenience set: perl, rsync, strace.  perl
-  # stays in the closure regardless (the activation script is written in it),
-  # but nothing else here has a reason to ship.
+  # ~57 MiB of Perl, and it took two removals to see the real holder.  With
+  # xdg-utils gone the only thing left pulling perl in is the activation
+  # script itself - setup-etc.pl and update-users-groups.pl - which is exactly
+  # what nixpkgs' own profiles/perlless.nix replaces: an overlayfs /etc instead
+  # of the script that populates it, and userborn instead of the one that
+  # creates users.  Both want systemd in the initrd.  The /etc overlay is
+  # upstream-experimental and stays mutable, which xrdp needs: it writes its
+  # self-signed certificate into /etc/xrdp on first start.
+  boot.initrd.systemd.enable = true;
+  system.etc.overlay.enable = true;
+  services.userborn.enable = true;
+
+  # The list of things this image has already been caught shipping.  A closure
+  # budget only says "bigger"; a package can come back transitively while
+  # something else shrinks and the total stays inside the budget.  This is the
+  # same guard nixpkgs uses in perlless.nix, pointed at our own ghosts.
+  system.forbiddenDependenciesRegexes = [
+    "perl"
+    "speech-dispatcher"
+    "mbrola"
+    "espeak"
+    "flite"
+    "freepats"
+    "ghostscript"
+    "zenity"
+    "pavucontrol"
+    "xterm"
+  ];
+
+  # NixOS's "interactive system" convenience set: perl, rsync, strace.
   environment.defaultPackages = lib.mkForce [ ];
 
   # nixos-rebuild, nixos-install, nixos-enter, nixos-generate-config,

@@ -436,13 +436,16 @@ purpose NixOS box. Measured with `tools/closure.sh` against nixpkgs 25.11:
 | Taken out of the production image | Closure |
 | --- | --- |
 | baseline, before any of this | 3.82 GiB |
+| Perl, and the xdg-utils that was holding it | -57 MiB |
+| the default font set, minus the two fonts this renders with | -36 MiB |
+| desktop-session leftovers: XDG mime/icons/menus, nixos-icons, Avahi | -36 MiB |
 | Mesa and the LLVM behind llvmpipe | -768 MiB |
 | speech-dispatcher, espeak-ng, flite and 648 MiB of MBROLA voices | -699 MiB |
 | ffmpeg's SDL output device, and everything behind it (see below) | -331 MiB |
 | the nixpkgs sources pinned into `/etc/nix/registry.json` and `NIX_PATH` | -186 MiB |
 | xterm, pavucontrol, alsa-utils, man-db, docs, installer tools, `environment.defaultPackages` | -160 MiB |
 | the display-manager layer: LightDM, the NixOS xsession script, feh, Ghostscript | -84 MiB |
-| **production total** | **1.65 GiB (-56.9%)**, 1024 store paths down to 781 |
+| **production total** | **1.52 GiB (-60.2%)**, 1024 store paths down to 727 |
 
 Three of those were never asked for by anything in the appliance:
 
@@ -492,12 +495,36 @@ the process at exec time. The two that actually paid were subtler:
 - `zenity` is on `PATH` for the folder picker behind "add local files". A kiosk
   has no local files; traced through a startup, Spotify never runs it.
 
+Perl deserves a note, because the obvious explanation was wrong twice. It is
+not in the image because the activation scripts are written in it - or rather,
+it was not *only* that. `services.graphical-desktop.enable`, which follows
+`services.xserver.enable` around, installs `xdg-utils`, and xdg-utils is a pile
+of Perl scripts with `libwww-perl` and `XML-Twig` behind them. Only once that
+was gone did the activation scripts become the last holder, and then nixpkgs'
+own `profiles/perlless.nix` had the answer: an overlayfs `/etc` instead of
+`setup-etc.pl`, `userborn` instead of `update-users-groups.pl`, and
+`system.forbiddenDependenciesRegexes = [ "perl" ]` to keep it out. The
+production profile now carries that regex list for every ghost this branch has
+exorcised, because a closure budget only says "bigger" - a package can come
+back transitively while something else shrinks and the total stays inside.
+
 What is left is mostly honest: Spotify itself (345 MiB), the kernel and its
 modules (126 MiB), a python3 (107 MiB) that four separate things need
 (`hyperv-daemons`, `cloud-utils` for `growPartition`, the systemd-boot
-generation builder and glib's `gdbus-codegen`), perl (57 MiB, the activation
-script is written in it), systemd, and the GTK3/Xorg/xrdp/PulseAudio path the
-appliance exists to run.
+generation builder and glib's `gdbus-codegen`), systemd, and the
+GTK3/Xorg/xrdp/PulseAudio path the appliance exists to run.
+
+`tools/closure.sh roots` ranks the system packages by *added size* - what
+actually leaves the closure if that one package is dropped, which is the only
+number worth acting on, since a 300 MiB package is free when everything it
+needs is already there. It found the next two candidates immediately: the
+appliance carries an OpenSSH client (9 MiB) with sshd disabled, and BIND's
+`host` (8 MiB) with static resolvers, both because
+`nixos/modules/programs/ssh.nix` and `nixos/modules/tasks/network-interfaces.nix`
+add them to `environment.corePackages` unconditionally. There is no option to
+switch either off; `environment.corePackages` would have to be replaced with an
+allowlist, and that is a separate experiment - system scripts expect GNU
+semantics, and "it still boots" is not the same as "nothing broke".
 
 ### Why The Image Is ext4, And What Compression Would Buy
 

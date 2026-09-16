@@ -4,6 +4,7 @@
 #   tools/closure.sh report [ATTR]   size of one system plus its heaviest paths
 #   tools/closure.sh diff            what the debug image carries and prod does not
 #   tools/closure.sh why NEEDLE      why the production image still contains NEEDLE
+#   tools/closure.sh roots [N]       system packages ranked by what they alone cost
 #   tools/closure.sh check           CI gate: budget, and no nixpkgs channel in the image
 #   tools/closure.sh baseline        record today's production size as the budget
 #
@@ -110,6 +111,77 @@ cmd_why() {
   done
 }
 
+# `why` answers "who is holding this", which is the wrong question when you are
+# choosing what to remove next: a 300 MiB package can be free if everything it
+# needs is already in the closure for other reasons.  This answers the right
+# one - how much of the closure disappears if this root, and nothing else, goes
+# away.  That is `nix-tree`'s "added size", computed over the reference graph
+# instead of guessed from closure sizes.
+#
+# Needs python3 on PATH for the graph walk; the rest of this script is bash.
+cmd_roots() {
+  local top="${1:-20}" out tmp
+  out=$(build "$prod_attr")
+  command -v python3 >/dev/null || die "roots needs python3 on PATH"
+  tmp=$(mktemp -d); trap 'rm -rf "$tmp"' RETURN
+
+  nix eval --json \
+    ".#nixosConfigurations.spotibox.config.environment.systemPackages" \
+    --apply 'ps: map (p: p.outPath) ps' > "$tmp/roots.json"
+  nix path-info -r "$out" > "$tmp/paths.txt"
+  nix path-info -rs "$out" > "$tmp/sizes.txt"
+
+  TOP="$out" N="$top" python3 - "$tmp" <<'PYROOTS'
+import json, os, subprocess, sys
+tmp = sys.argv[1]
+top = os.environ["TOP"]
+n = int(os.environ["N"])
+
+paths = [l.strip() for l in open(f"{tmp}/paths.txt") if l.strip()]
+sizes = {}
+for line in open(f"{tmp}/sizes.txt"):
+    a = line.split()
+    if len(a) >= 2:
+        sizes[a[0]] = int(a[1])
+refs = {
+    p: subprocess.run(["nix-store", "-q", "--references", p],
+                      capture_output=True, text=True).stdout.split()
+    for p in paths
+}
+
+def reach(blocked):
+    seen, stack = set(), [top]
+    while stack:
+        x = stack.pop()
+        if x in seen or x in blocked:
+            continue
+        seen.add(x)
+        stack.extend(refs.get(x, []))
+    return seen
+
+full = reach(set())
+total = sum(sizes.get(p, 0) for p in full)
+# systemPackages lists some packages more than once (every user's shell, for
+# one), and the same path twice is the same removal.
+roots = list(dict.fromkeys(r for r in json.load(open(f"{tmp}/roots.json")) if r in refs))
+
+rows = []
+for r in roots:
+    gone = full - reach({r})
+    rows.append((sum(sizes.get(p, 0) for p in gone), len(gone), r))
+rows.sort(reverse=True)
+
+def mib(b):
+    return f"{b / 2**20:8.1f} MiB"
+
+print(f"closure: {mib(total)} over {len(full)} paths, {len(roots)} system packages")
+print(f"\n{'added size':>12} {'paths':>6}  package")
+for size, count, r in rows[:n]:
+    print(f"{mib(size)} {count:>6}  {r.split('/')[-1][33:]}")
+print("\nadded size = what leaves the closure if this package alone is dropped.")
+PYROOTS
+}
+
 # The other half of the budget: upstream's Hyper-V image copies a full nixpkgs
 # source tree into the VHDX as the root user's channel, because
 # make-disk-image's copyChannel argument defaults to true and
@@ -209,11 +281,12 @@ case "${1:-}" in
   report)   shift; cmd_report "$@" ;;
   diff)     shift; cmd_diff "$@" ;;
   why)      shift; cmd_why "$@" ;;
+  roots)    shift; cmd_roots "$@" ;;
   check)    shift; cmd_check "$@" ;;
   baseline) shift; cmd_baseline "$@" ;;
   image-channel) shift; cmd_image_channel "$@" ;;
   *)
-    sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac
