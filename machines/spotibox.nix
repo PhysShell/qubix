@@ -13,6 +13,7 @@
     ../profiles/modes/debug.nix
     ../profiles/modes/prod.nix
     ../profiles/kernel/default.nix
+    ../profiles/kernel/hyperv.nix
   ];
 
   networking.hostName = "spotibox";
@@ -31,7 +32,7 @@
     gui = "openbox";
     audio = "pulseaudio-xrdp";
     app = "spotify";
-    kernel = "default";
+    kernel = "hyperv";
     # RDP only reports the client's *active* layout, so a Russian typist
     # connecting while Windows sits on the US layout would otherwise get a
     # single Latin group and nothing to toggle to.  Name both explicitly.

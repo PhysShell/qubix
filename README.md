@@ -453,7 +453,8 @@ purpose NixOS box. Measured with `tools/closure.sh` against nixpkgs 25.11:
 | Nix, and the Python boot-loader installer that was holding it (see below) | -52 MiB |
 | `growpart`, on a disk the controller never resizes | -1 MiB |
 | `lsvmbus`, and with it the last Python interpreter (see below) | -108 MiB |
-| **production total** | **1.27 GiB (-66.8%)**, 1024 store paths down to 589 |
+| a kernel built for one machine instead of for all of them (see below) | -118 MiB |
+| **production total** | **1.15 GiB (-69.9%)**, 1024 store paths down to 583 |
 
 Three of those were never asked for by anything in the appliance:
 
@@ -596,6 +597,69 @@ the entry, the EFI stub loads the initrd, the root and home filesystems mount,
 the static address comes up, and xrdp answers an X.224 connection request from
 outside the VM. The NixOS VM tests cannot cover any of that: they boot with
 `-kernel`/`-initrd` and never touch an ESP.
+
+### A Kernel For One Machine
+
+`boot.kernelPackages = pkgs.linuxPackages` is a sentence that means "I know
+this machine's hardware down to the model of its network adapter, so give me a
+kernel for every device ever built." nixpkgs builds its kernels with
+`autoModules = true`, which answers `m` to every question the kernel's config
+script asks. That is right for a distribution and wrong here: 126 MiB of
+modules - 9% of the image at the time - for a machine whose hardware is a
+VMBus, one synthetic disk controller, one synthetic NIC and a synthetic
+keyboard.
+
+`profiles/kernel/hyperv.nix` builds the same source with `autoModules = false`
+and `kernelPreferBuiltin = true`, so unanswered questions fall back to the
+architecture default instead of becoming modules, and what remains is compiled
+in rather than loaded:
+
+| | stock | this |
+| --- | --- | --- |
+| modules tree | 126.2 MiB | 3.7 MiB |
+| kernel | 19.8 MiB | 29.1 MiB |
+| initrd | 24.4 MiB | 22.0 MiB |
+| **total** | **170.4 MiB** | **54.8 MiB** |
+
+The kernel image grows because the drivers moved into it. That is the trade,
+and it is a good one at this ratio - but it is also why stage two, which
+removes whole subsystems, matters more than it looks: every driver cut now
+comes straight out of the `bzImage`.
+
+**What the appliance is not allowed to lose** is stated explicitly, and the
+list is longer than "Hyper-V". `system.etc.overlay` made `overlayfs` and
+`erofs` part of the boot contract when this image went perlless - `/etc` is an
+overlay over an erofs metadata image, so without either of them the system has
+no `/etc` at all. The console is `DRM_HYPERV`, a DRM driver rather than an
+fbdev one, so the graphics subsystem cannot simply be deleted either. And the
+QEMU drivers are in the contract on purpose: a kernel that only boots on
+Hyper-V is a kernel nobody can check before shipping, so virtio, 9p and AHCI
+are named rather than left to survive by accident.
+
+`tests/kernel-contract.nix` reads the finished `.config` - cheap, because the
+config is produced by the kernel's configure phase and not by compiling it -
+and asserts every symbol above with the reason it is there. It earned its keep
+immediately: turning `autoModules` off had silently taken `NF_TABLES` with it,
+and NixOS's firewall is `iptables-nft`, so the rule that makes 3389 the only
+way in would have quietly had nothing to run on.
+
+Three more things went wrong in ways worth writing down, because they are the
+shape of this work rather than accidents:
+
+- `boot.initrd.includeDefaultModules` puts a fixed list into every initrd -
+  SATA controllers, NVMe, SD readers, and one entry per USB keyboard vendor
+  that ever needed a quirk. A name in that list which does not resolve is a
+  hard build failure, so the first thing a trimmed kernel produces is `FATAL:
+  Module hid_corsair not found`, forty minutes into a compile. It is off here,
+  and what the initrd needs is named.
+- `nixos/modules/profiles/qemu-guest.nix`, which every NixOS VM test imports,
+  names seven more modules the same way. That list is now in the contract test
+  in full, so the failure arrives in seconds instead of in the middle of a
+  kernel build.
+- `VIRTIO_SCSI` is not a Kconfig symbol; the driver is `SCSI_VIRTIO`. With
+  `ignoreConfigErrors` a wrong name is not an error - the option simply does
+  nothing. The contract test is what noticed, which is the entire argument for
+  asserting the output rather than trusting the input.
 
 ### The Last Python Was A Diagnostic
 

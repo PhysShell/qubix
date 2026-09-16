@@ -217,6 +217,13 @@
         import ./tests/xrdp-session.nix {
           inherit pkgs;
         };
+
+      spotibox-kernel-contract =
+        import ./tests/kernel-contract.nix {
+          inherit pkgs lib;
+          prod = spotibox.config;
+          debug = spotiboxDebug.config;
+        };
     };
   };
 }
