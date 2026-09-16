@@ -561,21 +561,37 @@ its 128 KiB blocks compress better than erofs's 4 KiB clusters anyway:
 | erofs, `Compression=lz4hc` | 1144 MiB | yes |
 | **squashfs, `Compression=zstd`** | **839 MiB** | **yes** |
 
-The squashfs image is the one quoted above: 691 MiB of store, 46 MiB of verity
-hashes and a 100 MiB ESP holding a single 36 MiB UKI, so there is room to trim
-in two of those three. Enabling `EROFS_FS_ZIP_ZSTD` in a custom kernel would
-buy back erofs's faster random reads, but not size - and it would cost a
-from-source kernel build in every release, since that config is not what
-cache.nixos.org has.
+The squashfs image breaks down as 691 MiB of store, 46 MiB of verity hashes and
+the ESP. Enabling `EROFS_FS_ZIP_ZSTD` in a custom kernel would buy back erofs's
+faster random reads, but not size - and it would cost a from-source kernel
+build in every release, since that config is not what cache.nixos.org has.
+
+The ESP has a floor that is not where `SizeMinBytes` says it is.
+systemd-repart will not make a vfat partition smaller than 100 MiB: asking for
+8M, 64M or 96M all produce exactly 100 MiB, while 300M produces 300 MiB. FAT32
+wants 65525 clusters and repart refuses to go below a safe minimum. The way
+around it is to stop asking repart to format the ESP at all - build the FAT
+image in its own derivation, put the UKI in it with `mtools`, and hand repart
+the result with `CopyBlocks=`:
+
+| | Image |
+| --- | --- |
+| 100 MiB ESP (repart's vfat floor) | 839 MiB |
+| **64 MiB ESP via `CopyBlocks=`** | **803 MiB** |
+
+That variant also builds without a privileged mount, because `CopyBlocks=`
+skips both `mkfs.vfat` and the loopback mount that populating a vfat partition
+otherwise needs. The 64 MiB ESP still has 28 MiB free next to its 34 MiB UKI,
+so the real floor is the UKI - kernel plus initrd - not the filesystem.
 
 Two things are worth knowing before anyone reaches for it:
 
 - **Compression does not make the download much smaller.** The release asset is
   a gzip of the image, and gzip of an already-compressed filesystem gains
-  nothing: 715 MiB today against 839 MiB for the squashfs image. What does
+  nothing: 715 MiB today against 803 MiB for the squashfs image. What does
   shrink is the space the VM occupies on the Windows host, because a dynamic
   VHDX only allocates the blocks the filesystem actually wrote: roughly 1.8 GB
-  now against 839 MiB. The download is a wash; the footprint halves.
+  now against 803 MiB. The download is a wash; the footprint drops by 2.3x.
 - Hardlink deduplication - what `nix-store --optimise` does - is not the
   missing gigabyte. Hashing every file in the closure finds 4192 duplicates
   worth 29 MiB, or 1.8%. Nix already deduplicates at the granularity that
