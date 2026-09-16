@@ -35,6 +35,10 @@ let
 
   has = haystack: needle: builtins.elem needle haystack;
 
+  # The accounts a person logs into, as opposed to the ones systemd invents.
+  human = n: lib.elem n [ "user" "rdp" ];
+  humansOf = cfg: filter human (lib.attrNames cfg.users.users);
+
   # Tools with no way to be reached from a kiosk session: the Openbox menu is
   # covered by a maximised, undecorated Spotify window, and there is no
   # terminal to type in even if it were not.
@@ -240,6 +244,25 @@ let
         let n = map getName prod.environment.corePackages;
         in !(lib.any (x: lib.elem x n) [ "openssh" "bind" "curl" "coreutils-full" ]);
       detail = "corePackages: ${concatStringsSep " " (map getName prod.environment.corePackages)}";
+    }
+    {
+      name = "prod: one account, and nothing for it to escalate with";
+      # `rdp` is the account a remote client logs into with a password this
+      # repository publishes.  It is not in wheel, wheel is empty, and sudo is
+      # off - three ways of saying the same thing, because any one of them
+      # coming back on its own would be enough.  `user` exists to be logged
+      # into and to run commands as root, which makes it a debugging tool.
+      ok =
+        humansOf prod == [ "rdp" ]
+        && lib.sort (a: b: a < b) (humansOf debug) == [ "rdp" "user" ]
+        && !(lib.elem "wheel" prod.users.users.rdp.extraGroups)
+        && (prod.users.groups.wheel.members or [ ]) == [ ]
+        && !prod.security.sudo.enable
+        && debug.security.sudo.enable;
+      detail = "prod accounts: ${concatStringsSep " " (humansOf prod)}, "
+        + "rdp groups: ${concatStringsSep " " prod.users.users.rdp.extraGroups}, "
+        + "wheel: ${concatStringsSep " " (prod.users.groups.wheel.members or [ ])}, "
+        + "sudo: ${lib.boolToString prod.security.sudo.enable}";
     }
     {
       name = "prod: no sshd";

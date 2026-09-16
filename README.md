@@ -208,6 +208,46 @@ nix run nixpkgs#actionlint
 `actionlint` catches the whole class of errors GitHub reports only as a failed
 run, such as using a context where none is allowed.
 
+## Release Readiness
+
+A tag is not a size milestone; it is a claim that the appliance still works.
+These five have to be green before one, and the middle two are the only ones
+this repository cannot produce on its own:
+
+| Gate | How | Where |
+| --- | --- | --- |
+| OVMF acceptance | `tools/cold-boot.sh` - firmware, boot loader, root and home filesystems, static address, an RDP reply | anywhere with QEMU |
+| Contract | `nix flake check` - the prod/debug split, the kernel contract, both VM tests | CI, and locally |
+| **Real Hyper-V cold boot** | `tools/qubix-acceptance.ps1` | the Hyper-V host, by hand |
+| **Hyper-V integration checks** | the same script: Dynamic Memory, host-requested shutdown, KVP | the Hyper-V host, by hand |
+| Size telemetry | `tools/telemetry.sh`, recorded against `tests/image-budget.nix` | the release job |
+
+The two in bold are the standing gap. `tools/cold-boot.sh` proves the kernel
+and userspace did not fall over, but it runs under OVMF and QEMU, where there
+is no VMBus at all - and this appliance's kernel now has no hardware story
+*except* VMBus, while its Integration Services are a hand-picked subset rather
+than what nixpkgs ships. Three claims rest on that and nothing here can reach
+them:
+
+- **Dynamic Memory.** `hv_balloon` is in the initrd and the hot-add udev rules
+  are copied verbatim into `profiles/modes/prod.nix`, but nothing has watched
+  the host hand this guest a memory block and seen the guest bring it online.
+  The script raises the VM's minimum above what it currently has and waits for
+  `MemoryAssigned` to follow, which tests the driver and the udev rules
+  together.
+- **Host-requested shutdown.** `Stop-VM` without `-Force` goes through the
+  shutdown integration service. There is no userspace daemon in that path -
+  `hv_utils` answers it in the kernel by calling `orderly_poweroff()` - which
+  is exactly why dropping `hv_vss_daemon` and `hv_fcopy_uio_daemon` is
+  supposed to be safe, and exactly what has not been observed.
+- **KVP.** `hv_kvp_daemon` is the one Integration Service that was kept, on
+  the grounds that `Get-QubixAddress` falls back to it for machines without a
+  static IP. That fallback has never been watched working on a build where the
+  other two daemons are gone.
+
+The script also finishes with a second cold boot, because a shutdown that
+corrupted the root filesystem shows up there and nowhere else.
+
 ## Publishing A Release
 
 ```bash
@@ -299,6 +339,7 @@ tools/closure.sh diff                                        # what the debug im
 tools/closure.sh why cups                                    # who is still holding on to a store path
 tools/closure.sh check                                       # the CI closure gate, locally
 tools/cold-boot.sh                                           # boots the real VHDX through OVMF, ESP and all
+tools/telemetry.sh                                           # image-level sizes against tests/image-budget.nix
 pwsh ./tests/qubixctl.Tests.ps1                              # controller unit checks
 ```
 
@@ -312,6 +353,8 @@ Manual acceptance on Windows:
 4. Log into Spotify, run `qubixctl -Command recreate`, click again: still
    logged in.
 5. Quit Spotify: the RDP window closes.
+6. Run `tools\qubix-acceptance.ps1` elevated. It is the only thing that tests
+   Dynamic Memory, host-requested shutdown and KVP - see *Release Readiness*.
 
 ## Design Notes
 
@@ -1032,11 +1075,15 @@ tools/
   update-manifest.sh
   closure.sh               closure census and budget (report/diff/why/check/baseline)
   cold-boot.sh             boots a built VHDX through OVMF firmware, checks RDP
+  telemetry.sh             image-level size telemetry and budget, run at release
+  qubix-acceptance.ps1     Hyper-V acceptance: Dynamic Memory, shutdown, KVP
 tests/
   spotibox-basic.nix       NixOS VM test: what the image contains
   xrdp-session.nix         NixOS VM test: a real xrdp session, X, keyboard, kiosk
   appliance-split.nix      evaluation-only guard for the prod/debug split
   closure-budget.nix       recorded production closure budget, enforced by CI
+  image-budget.nix         recorded image and release sizes, enforced at release
+  kernel-contract.nix      what the appliance kernel must and must not contain
   qubixctl.Tests.ps1       controller unit checks
 .github/workflows/
   ci.yml, release.yml

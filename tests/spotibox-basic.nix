@@ -19,8 +19,14 @@ pkgs.testers.nixosTest {
     machine.wait_for_unit("multi-user.target")
 
     machine.succeed("test $(hostname) = spotibox")
-    machine.succeed("test $(id -u user) = 1000")
+    # One account, no privileges.  `user` is the interactive login and lives
+    # on debug images only; `rdp` keeps uid 1001 either way, because /home
+    # outlives the system image and has to agree about who owns what.
     machine.succeed("test $(id -u rdp) = 1001")
+    machine.fail("id -u user")
+    machine.succeed("test -z \"$(id -nG rdp | tr ' ' '\\n' | grep -x wheel)\"")
+    machine.succeed("test -z \"$(getent group wheel | cut -d: -f4)\"")
+    machine.fail("command -v sudo")
     machine.succeed("command -v spotify")
     machine.succeed("command -v openbox-session")
     machine.succeed("systemctl is-enabled xrdp")

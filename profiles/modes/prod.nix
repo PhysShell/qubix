@@ -293,6 +293,23 @@ lib.mkIf (config.qubix.mode == "prod") {
   # The appliance's user list is what the image says it is.
   users.mutableUsers = false;
 
+  # NixOS refuses to build a system where neither root nor a wheel user has a
+  # password, on the grounds that you would be locked out of it.  That is the
+  # intent: this image has no sshd, no package manager and no installer tools,
+  # and it is replaced wholesale rather than repaired in place, so there is
+  # nothing a root shell on it could usefully do that rebuilding it cannot.
+  # The console is not sealed - `rdp` can log in there with the lab password -
+  # it just cannot become root.  When something needs diagnosing, the answer
+  # is the debug image, which keeps `user`, wheel, sudo and sshd.
+  users.allowNoPasswordLogin = true;
+
+  # With `user` gone and `rdp` out of `wheel` (see profiles/users.nix), the
+  # wheel group is empty and sudo guards a door into a room nobody is standing
+  # in.  Nothing in this image invokes it - not a unit, not the session, not
+  # the controller - so what shipped was 6 MiB and a setuid binary kept for
+  # symmetry with general-purpose NixOS.
+  security.sudo.enable = lib.mkForce false;
+
   # No package manager in a machine that cannot rebuild itself.  This is worth
   # exactly 9 MiB and not the 49 the nix closure suggests: the systemd-boot
   # generation builder interpolates ${"$"}{config.nix.package}/bin/nix-env, so the

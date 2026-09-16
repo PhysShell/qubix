@@ -59,6 +59,18 @@ jobs:
             fi
           done
 
+      - name: Size telemetry
+        # The closure gate runs on every pull request; this is the half that
+        # needs a finished image - what the VHDX occupies on a Windows host and
+        # what the asset costs to download.  It fails the release if anything
+        # grew past tests/image-budget.nix, so a package that quietly brings
+        # half a desktop back cannot reach a tag without somebody re-recording
+        # the budget and saying why.
+        run: |
+          tools/telemetry.sh --json > telemetry.json
+          cat telemetry.json
+          tools/telemetry.sh
+
       - name: Version stamp
         run: |
           tag="${{ inputs.tag || github.ref_name }}"
@@ -71,3 +83,4 @@ jobs:
           files: |
             release/*
             VERSION
+            telemetry.json
