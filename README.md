@@ -539,7 +539,8 @@ command line, `/nix/store` mounted read-only off `/dev/mapper/usr`, root on
 tmpfs, `multi-user.target` reached with **zero failed units** and xrdp and
 xrdp-sesman both active and listening on 3389.
 
-It also found the trap. systemd-repart will cheerfully build an erofs with
+It also found the trap, which is why the filesystem matters more than the
+algorithm. systemd-repart will cheerfully build an erofs with
 `Compression=zstd`, and the stock NixOS kernel cannot mount it:
 
 ```text
@@ -548,32 +549,48 @@ erofs: (device dm-0): z_erofs_parse_cfgs: algorithm 3 isn't enabled on this kern
 ```
 
 `CONFIG_EROFS_FS_ZIP=y` but `CONFIG_EROFS_FS_ZIP_ZSTD is not set`, so the image
-builds, passes its verity check, and then drops straight into emergency mode.
-LZ4 is the only algorithm the stock kernel has. That costs ratio:
+builds, passes its verity check, and then drops straight into emergency mode on
+a machine nobody can log into. LZ4 is the only algorithm the stock kernel's
+erofs has. Squashfs, on the other hand, is built `CONFIG_SQUASHFS_ZSTD=y` - and
+its 128 KiB blocks compress better than erofs's 4 KiB clusters anyway:
 
-| erofs store | Image |
-| --- | --- |
-| no compression | 1868 MiB |
-| `Compression=zstd` (does not mount on the stock kernel) | 968 MiB |
-| `Compression=lz4hc` (boots) | 1144 MiB |
+| store filesystem | Image | Boots on the stock kernel |
+| --- | --- | --- |
+| erofs, no compression | 1868 MiB | yes |
+| erofs, `Compression=zstd` | 968 MiB | **no** |
+| erofs, `Compression=lz4hc` | 1144 MiB | yes |
+| **squashfs, `Compression=zstd`** | **839 MiB** | **yes** |
 
-An oversized 100 MiB ESP and a 54 MiB verity hash tree are in every one of
-those numbers and both can be trimmed.
+The squashfs image is the one quoted above: 691 MiB of store, 46 MiB of verity
+hashes and a 100 MiB ESP holding a single 36 MiB UKI, so there is room to trim
+in two of those three. Enabling `EROFS_FS_ZIP_ZSTD` in a custom kernel would
+buy back erofs's faster random reads, but not size - and it would cost a
+from-source kernel build in every release, since that config is not what
+cache.nixos.org has.
 
 Two things are worth knowing before anyone reaches for it:
 
-- **Compression does not make the download smaller. It makes it bigger.** The
-  release asset is a gzip of the image, and gzip of an already-compressed
-  filesystem gains nothing: 715 MiB today against the 1144 MiB of an image that
-  boots. What shrinks is the space the VM occupies on the Windows host, because
-  a dynamic VHDX only allocates the blocks the filesystem actually wrote -
-  roughly 1.8 GB now against roughly 1.14 GB. A kernel built with
-  `EROFS_FS_ZIP_ZSTD` would move both numbers a long way (968 MiB), which is
-  probably the first thing to try if this is ever taken further.
+- **Compression does not make the download much smaller.** The release asset is
+  a gzip of the image, and gzip of an already-compressed filesystem gains
+  nothing: 715 MiB today against 839 MiB for the squashfs image. What does
+  shrink is the space the VM occupies on the Windows host, because a dynamic
+  VHDX only allocates the blocks the filesystem actually wrote: roughly 1.8 GB
+  now against 839 MiB. The download is a wash; the footprint halves.
 - Hardlink deduplication - what `nix-store --optimise` does - is not the
   missing gigabyte. Hashing every file in the closure finds 4192 duplicates
   worth 29 MiB, or 1.8%. Nix already deduplicates at the granularity that
   matters.
+
+ZFS was considered and measured rather than argued about. Neither
+make-disk-image nor systemd-repart can format it, so it would need a third
+image pipeline; `pkgs.zfs`'s closure is 351 MiB, a fifth of the entire
+appliance, before the out-of-tree module built per kernel; and the ARC would
+claim half the VM's RAM by default. What it offers - transparent compression,
+checksums, snapshots - is compression this already gets for free, integrity
+that dm-verity does better for a read-only store, and snapshots of a system
+disk the design already treats as disposable. The one place it could earn its
+keep is the persistent `/home` disk, which mostly holds an already-compressed
+Spotify cache.
 
 Secure Boot is already off on the VM (`Set-VMFirmware -EnableSecureBoot Off`),
 so an unsigned UKI would boot; the work is the rest of the pipeline - image
@@ -623,11 +640,13 @@ tests/
 
 ## TODO / Later Goals
 
-- Move the image to `image.repart` with a compressed, dm-verity-protected
-  erofs store (see *Why The Image Is ext4*). It halves what the VM occupies on
-  the host, makes the system disk verifiable rather than merely disposable,
-  and drops the KVM requirement from the release job - at the cost of a larger
-  download and a new boot path (UKI + systemd initrd).
+- Move the image to `image.repart` with a dm-verity-protected squashfs store
+  (see *Why The Image Is ext4*). It halves what the VM occupies on the host,
+  makes the system disk verifiable rather than merely disposable, and drops the
+  KVM requirement from the release job - at the cost of a slightly larger
+  download and a new boot path (UKI + systemd initrd). The shape is proven: it
+  boots, mounts the store off `/dev/mapper/usr`, and brings xrdp up with no
+  failed units. What is not done is the pipeline around it.
 - Spotify network lockdown via nftables, proxy or DNS allowlist.
 - PipeWire + EasyEffects experiment once xrdp audio is understood.
 - Hardening profile, possibly inspired by nix-mineral, applied carefully.
