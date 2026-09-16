@@ -29,7 +29,9 @@ let
   prodNames = names prod;
   debugNames = names debug;
 
-  spotifyOf = cfg: lib.findFirst (p: getName p == "spotify") null cfg.environment.systemPackages;
+  pkgOf = name: cfg: lib.findFirst (p: getName p == name) null cfg.environment.systemPackages;
+  spotifyOf = pkgOf "spotify";
+  openboxOf = pkgOf "openbox";
 
   has = haystack: needle: builtins.elem needle haystack;
 
@@ -99,6 +101,17 @@ let
         && spotifyOf debug != null
         && (spotifyOf prod).drvPath != (spotifyOf debug).drvPath;
       detail = "prod and debug carry the same Spotify derivation";
+    }
+    {
+      name = "prod: the trimmed openbox, not the one carrying a Python";
+      # 52 MiB: nixpkgs wraps openbox-xdg-autostart with CPython and pyxdg, and
+      # propagates pango's and imlib2's dev outputs into the runtime closure.
+      # profiles/gui/openbox.nix removes both for production only, so the two
+      # images must not share a derivation.
+      ok = openboxOf prod != null
+        && openboxOf debug != null
+        && (openboxOf prod).drvPath != (openboxOf debug).drvPath;
+      detail = "prod and debug carry the same openbox derivation";
     }
     {
       name = "prod: no desktop-session bits and no Perl activation";

@@ -4,6 +4,59 @@ let
   debug = config.qubix.mode == "debug";
 in
 lib.mkIf (config.qubix.gui == "openbox") {
+  # Openbox looks like the one package here that nobody needs to argue about:
+  # 1.5 MiB, a window manager and nothing else.  Its closure is 302 MiB, and
+  # 52 MiB of that is reachable from no code path this appliance can execute.
+  # Two separate reasons, both visible in pkgs/by-name/op/openbox/package.nix:
+  #
+  #   * `pythonPath = [ pyxdg ]` and `wrapPythonProgramsIn "$out/libexec"` put
+  #     a wrapped CPython on `libexec/openbox-xdg-autostart`, which exists to
+  #     launch XDG autostart entries.  It is called from one place,
+  #     `libexec/openbox-autostart`, which is called from `openbox-session`.
+  #     The kiosk session runs `openbox` directly and production forces
+  #     `xdg.autostart.enable` off, so nothing in this image reaches it.
+  #   * `propagatedBuildInputs = [ pango imlib2 ]` writes their *dev* outputs
+  #     into `nix-support/propagated-build-inputs`, and Nix scans that file for
+  #     references like any other.  So the runtime closure of a window manager
+  #     contains pango-dev, imlib2-dev and, behind them, glib-dev, gettext,
+  #     the Linux kernel headers and a dozen more `-dev` outputs - 50 MiB of
+  #     build-time metadata in an appliance that compiles nothing.
+  #
+  # An overlay rather than a package option: the upstream window-manager module
+  # has no `package` option and interpolates `pkgs.openbox` directly, and so do
+  # the session command below and the kiosk session in profiles/apps/spotify.nix.
+  # Debug images keep the stock package, as they keep everything else.
+  #
+  # The interpreter itself does not leave the image with this - systemd-boot's
+  # installer, `lsvmbus` from hyperv-daemons and growpart each hold their own
+  # reference to it - but pyxdg, packaging and the whole -dev tail do.
+  nixpkgs.overlays = lib.optionals (!debug) [
+    (_final: prev: {
+      openbox = prev.openbox.overrideAttrs (old: {
+        postFixup = (old.postFixup or "") + ''
+          rm -f "$out/libexec/openbox-xdg-autostart" \
+                "$out/libexec/.openbox-xdg-autostart-wrapped"
+
+          # The helper is invoked from exactly one line, and --replace-fail is
+          # the guard: if upstream ever moves the call, this stops being a
+          # silent no-op.  The trailing marker swallows the "$@" after it.
+          substituteInPlace "$out/libexec/openbox-autostart" \
+            --replace-fail "$out/libexec/openbox-xdg-autostart" \
+                           "# xdg autostart removed, see profiles/gui/openbox.nix --"
+
+          rm -rf "$out/nix-support"
+
+          # If nixpkgs ever wraps another helper in here, fail the build rather
+          # than quietly putting an interpreter back into the appliance.
+          if grep -rl --binary-files=text -e '-python3-' "$out"; then
+            echo "openbox still references a Python interpreter (above)" >&2
+            exit 1
+          fi
+        '';
+      });
+    })
+  ];
+
   # Minimal X11 desktop stack.  Openbox is enough to host Spotify and, on debug
   # images, an emergency terminal, without dragging a full desktop environment
   # into the appliance.  openbox itself reaches systemPackages through

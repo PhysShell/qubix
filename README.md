@@ -448,7 +448,8 @@ purpose NixOS box. Measured with `tools/closure.sh` against nixpkgs 25.11:
 | the display-manager layer: LightDM, the NixOS xsession script, feh, Ghostscript | -84 MiB |
 | an OpenSSH client, BIND's `host`, and the rest of `corePackages` | -38 MiB |
 | the rest of NixOS's X server module (see below) | -10 MiB |
-| **production total** | **1.47 GiB (-61.4%)**, 1024 store paths down to 666 |
+| the Python interpreter and `-dev` outputs inside openbox (see below) | -52 MiB |
+| **production total** | **1.42 GiB (-62.8%)**, 1024 store paths down to 638 |
 
 Three of those were never asked for by anything in the appliance:
 
@@ -546,6 +547,38 @@ that Openbox owns the root window, and that the Spotify window is up and
 maximised. The X clients in it run as `rdp` with the session's own
 `Xauthority`, because `sesman` starts Xorg with `-auth` and root cannot open
 that display.
+
+### The Window Manager With A Python Interpreter In It
+
+Openbox is the package in this image least likely to be suspected of anything:
+1.5 MiB, a window manager, no dependencies worth arguing about. Its closure was
+302 MiB, and `tools/closure.sh why python3` pointed straight at it. Two
+independent reasons, both in `pkgs/by-name/op/openbox/package.nix`:
+
+- `pythonPath = [ pyxdg ]` together with `wrapPythonProgramsIn "$out/libexec"`
+  puts a wrapped CPython on `libexec/openbox-xdg-autostart`, whose job is to
+  launch XDG autostart entries. Exactly one thing calls it -
+  `libexec/openbox-autostart`, which is itself only called from
+  `openbox-session`. The kiosk session runs `openbox` directly, and production
+  forces `xdg.autostart.enable` off, so nothing in this image can reach it.
+- `propagatedBuildInputs = [ pango imlib2 ]` writes those packages' **dev**
+  outputs into `nix-support/propagated-build-inputs`, and Nix scans that file
+  for store references like any other. So a window manager's runtime closure
+  contained `pango-dev`, `imlib2-dev` and, behind them, `glib-dev`, gettext,
+  the Linux kernel headers, `glibc-dev` and a dozen more `-dev` outputs: about
+  50 MiB of build-time metadata in an appliance that compiles nothing.
+
+An overlay in `profiles/gui/openbox.nix` removes the Python helper, comments
+out its one call site with `--replace-fail` so that an upstream change breaks
+the build instead of silently doing nothing, and drops `nix-support`. Openbox's
+closure goes from 302 MiB to 96 MiB and the image loses 52 MiB and 28 store
+paths. Debug images keep the stock package.
+
+The interpreter itself does not leave: `python3` is also held by systemd-boot's
+installer script, by `lsvmbus` from `hyperv-daemons`, and by `growpart` from
+`cloud-utils`. Three more references, three more things to look at - which is
+the general lesson here. The packages worth auditing are not the ones that look
+big; they are the ones nobody thinks to check.
 
 ### The Disk Was Sized For A Fear, Not A Measurement
 
