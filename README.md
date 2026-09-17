@@ -265,6 +265,19 @@ Running it, from the Windows host with the VM already created by
 `qubixctl` - it needs an existing VM, because what it tests is a machine in
 the state the controller leaves behind:
 
+First make sure WSL is actually on the revision you mean to test - `recreate
+-ImageSource wsl` builds from whatever the checkout is at, and an old checkout
+produces an old image without saying so:
+
+```bash
+cd ~/Documents/repos/qubix
+git fetch origin && git checkout <branch> && git pull --ff-only
+git rev-parse --short HEAD          # this is what you are about to ship
+```
+
+Then, from an **elevated** PowerShell on the host - `recreate` changes Hyper-V
+state and `qubixctl.cmd` does not elevate on its own:
+
 ```powershell
 # repo in WSL: assign the UNC path, do not cd into it
 $Qubix = "\\wsl.localhost\NixOS\home\nixos\Documents\repos\qubix"
@@ -273,8 +286,12 @@ $Qubix = "\\wsl.localhost\NixOS\home\nixos\Documents\repos\qubix"
 & "$Qubix\tools\qubix-acceptance.cmd"                              # then check it
 ```
 
-The `.cmd` elevates on its own - the Hyper-V cmdlets need it - and passes
-arguments through in both directions. Nothing else has to be enabled first:
+`qubix-acceptance.cmd` elevates on its own if you start it from an ordinary
+shell, and passes arguments through in both directions; run from an already
+elevated one it just runs. Nix writes its build progress to stderr, and
+Windows PowerShell turns every such line into a red `NativeCommandError`
+record - that is noise, not failure. The real verdict is the last line.
+Nothing else has to be enabled first:
 `qubixctl` already creates the VM as generation 2, with Secure Boot off and
 Dynamic Memory on between 1 and 6 GiB, which is what the memory checks need.
 Expect four or five minutes, most of it the two cold boots.
