@@ -218,7 +218,7 @@ this repository cannot produce on its own:
 | --- | --- | --- |
 | OVMF acceptance | `tools/cold-boot.sh` - firmware, boot loader, root and home filesystems, static address, an RDP reply | anywhere with QEMU |
 | Contract | `nix flake check` - the prod/debug split, the kernel contract, both VM tests | CI, and locally |
-| **Real Hyper-V cold boot** | `tools/qubix-acceptance.ps1` | the Hyper-V host, by hand |
+| **Real Hyper-V cold boot** | `tools\qubix-acceptance.cmd` | the Hyper-V host, by hand |
 | **Hyper-V integration checks** | the same script: Dynamic Memory, host-requested shutdown, KVP | the Hyper-V host, by hand |
 | Size telemetry | `tools/telemetry.sh`, recorded against `tests/image-budget.nix` | the release job |
 
@@ -261,7 +261,25 @@ address: it waits for the expected one, ignoring IPv6 and link-local, because
 a guest answering with an address it invented itself proves nothing about the
 static configuration.
 
-Everything is timed, and `-ReportPath` writes the evidence out: image
+Running it, from the Windows host with the VM already created by
+`qubixctl` - it needs an existing VM, because what it tests is a machine in
+the state the controller leaves behind:
+
+```powershell
+# repo in WSL: assign the UNC path, do not cd into it
+$Qubix = "\\wsl.localhost\NixOS\home\nixos\Documents\repos\qubix"
+
+& "$Qubix\tools\qubixctl.cmd" -Command recreate -ImageSource wsl   # put this build on the VM
+& "$Qubix\tools\qubix-acceptance.cmd"                              # then check it
+```
+
+The `.cmd` elevates on its own - the Hyper-V cmdlets need it - and passes
+arguments through in both directions. Nothing else has to be enabled first:
+`qubixctl` already creates the VM as generation 2, with Secure Boot off and
+Dynamic Memory on between 1 and 6 GiB, which is what the memory checks need.
+Expect four or five minutes, most of it the two cold boots.
+
+Everything is timed, and the evidence is written out: image
 revision, Hyper-V host and OS build, VM generation and configuration version,
 the memory hot-add as a time series of assigned and demanded megabytes, a
 result and a duration per check, and a verdict. Keep it with the release.
@@ -374,8 +392,8 @@ Manual acceptance on Windows:
 4. Log into Spotify, run `qubixctl -Command recreate`, click again: still
    logged in.
 5. Quit Spotify: the RDP window closes.
-6. Run `tools\qubix-acceptance.ps1` elevated. It is the only thing that tests
-   Dynamic Memory, host-requested shutdown and KVP - see *Release Readiness*.
+6. Run `tools\qubix-acceptance.cmd`. It is the only thing that tests Dynamic
+   Memory, host-requested shutdown and KVP - see *Release Readiness*.
 
 ## Design Notes
 
@@ -1098,6 +1116,7 @@ tools/
   cold-boot.sh             boots a built VHDX through OVMF firmware, checks RDP
   telemetry.sh             image-level size telemetry and budget, run at release
   qubix-acceptance.ps1     Hyper-V acceptance: Dynamic Memory, shutdown, KVP
+  qubix-acceptance.cmd     elevating wrapper for it
 tests/
   spotibox-basic.nix       NixOS VM test: what the image contains
   xrdp-session.nix         NixOS VM test: a real xrdp session, X, keyboard, kiosk

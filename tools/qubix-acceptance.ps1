@@ -51,11 +51,19 @@
     Deadline for each of RDP, memory convergence and shutdown.
 
 .PARAMETER ReportPath
-    Where to write the evidence.  Attach it to the release.
+    Where to write the evidence.  Defaults to an `acceptance-<timestamp>.txt`
+    next to the VM, beside the image-version.txt qubixctl writes there, so a
+    run always leaves a record and it is always somewhere findable.  Attach it
+    to the release.
 
 .EXAMPLE
-    .\tools\qubix-acceptance.ps1
-    .\tools\qubix-acceptance.ps1 -ReportPath acceptance-v0.3.0.txt
+    .\tools\qubix-acceptance.cmd
+    .\tools\qubix-acceptance.cmd -ReportPath C:\temp\acceptance-v0.3.0.txt
+
+.NOTES
+    Needs an elevated shell: the Hyper-V cmdlets do.  tools\qubix-acceptance.cmd
+    elevates, sets a process-scoped execution policy and passes arguments
+    through, which is also what makes it work from a \\wsl.localhost\... path.
 #>
 
 [CmdletBinding()]
@@ -123,10 +131,12 @@ function Get-ManifestMachine {
     return $machine
 }
 
-function Get-ImageRevision {
+function Get-QubixVmDir {
+    # Where qubixctl keeps everything belonging to one VM: its disks, its
+    # generated .rdp file, and the image-version.txt it writes when it installs
+    # a system disk.
     param([object]$Config, [string]$Root)
 
-    $vmName = [string]$Config.vmName
     if ([string]::IsNullOrWhiteSpace($Root)) {
         $Root = if ($Config.PSObject.Properties.Name -contains 'vmRoot') {
             [string]$Config.vmRoot
@@ -134,8 +144,13 @@ function Get-ImageRevision {
             'C:\HyperV\Qubix'
         }
     }
-    # qubixctl writes this next to the VM when it installs a system disk.
-    $file = Join-Path (Join-Path $Root $vmName) 'image-version.txt'
+    return Join-Path $Root ([string]$Config.vmName)
+}
+
+function Get-ImageRevision {
+    param([string]$VmDir)
+
+    $file = Join-Path $VmDir 'image-version.txt'
     if (Test-Path -LiteralPath $file) {
         return (Get-Content -LiteralPath $file -Raw).Trim()
     }
@@ -221,9 +236,17 @@ if ($null -eq $vm) {
     throw "VM '$vmName' does not exist. Create it first: tools\qubixctl.cmd"
 }
 
+$vmDir = Get-QubixVmDir -Config $config -Root $VmRoot
+if ([string]::IsNullOrWhiteSpace($ReportPath)) {
+    # Always leave a record, and always somewhere findable.  A relative path
+    # would land wherever the elevated shell happened to start, which is
+    # system32 often enough to be a nuisance.
+    $ReportPath = Join-Path $vmDir ('acceptance-{0:yyyyMMdd-HHmmss}.txt' -f (Get-Date))
+}
+
 $startedAt = Get-Date
 Add-Note ("run started        : {0:o}" -f $startedAt)
-Add-Note ("image revision     : {0}" -f (Get-ImageRevision -Config $config -Root $VmRoot))
+Add-Note ("image revision     : {0}" -f (Get-ImageRevision -VmDir $vmDir))
 Add-Note ("Hyper-V host       : {0} ({1})" -f $env:COMPUTERNAME, [System.Environment]::OSVersion.VersionString)
 Add-Note ("VM                 : {0}" -f $vmName)
 Add-Note ("VM generation      : {0}" -f $vm.Generation)
@@ -383,10 +406,12 @@ Write-Host $table
 Write-Host ("final verdict: {0}" -f $verdict) -ForegroundColor $(
     if ($verdict -eq 'PASS') { 'Green' } else { 'Red' })
 
-if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
-    $evidence = @('Qubix Hyper-V acceptance', '') + $script:Notes + @('', $table.TrimEnd())
-    $evidence -join "`r`n" | Set-Content -LiteralPath $ReportPath -Encoding UTF8
-    Write-Host "wrote $ReportPath"
+$evidence = @('Qubix Hyper-V acceptance', '') + $script:Notes + @('', $table.TrimEnd())
+$parent = Split-Path -Parent $ReportPath
+if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) {
+    $null = New-Item -ItemType Directory -Path $parent -Force
 }
+$evidence -join "`r`n" | Set-Content -LiteralPath $ReportPath -Encoding UTF8
+Write-Host "evidence: $ReportPath"
 
 if ($verdict -ne 'PASS') { exit 1 }
