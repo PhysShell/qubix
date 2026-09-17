@@ -78,7 +78,17 @@
       # Used in DHCP mode; ignored when staticIp is present.
       switchName = "Default Switch";
       cpuCount           = 2;
-      memoryStartupBytes = 4294967296;
+
+      # Startup, not "how much it needs".  Hyper-V has to find the whole
+      # startup amount before the guest exists, and only then does Dynamic
+      # Memory - which qubixctl enables between 1 and this maximum - let
+      # hv_balloon give the surplus back.  A 4 GiB floor is what a host with
+      # other things running refuses first, and the appliance does not want
+      # it: tests/xrdp-session.nix brings up Xorg under xrdp, Openbox and
+      # Spotify with its window mapped and maximised in a 2 GiB VM, which is
+      # the whole kiosk.  The maximum stays at 6 GiB because Spotify's cache
+      # is what grows, and growing is what Dynamic Memory is for.
+      memoryStartupBytes = 2147483648;
       maxMemoryBytes     = 6442450944;
       vmRoot    = "C:\\HyperV\\Qubix";
       wslDistro = "NixOS";
