@@ -495,9 +495,10 @@ already exists (Docker, a lab switch), reuse it or switch spotibox to DHCP.
 ## Validation
 
 ```bash
-nix flake check --no-build                                   # every system, both VM tests, the prod/debug split
+nix flake check --no-build                                   # every system, the VM tests, the prod/debug split
 nix build .#checks.x86_64-linux.spotibox-basic               # boots the appliance in QEMU
 nix build .#checks.x86_64-linux.spotibox-xrdp-session        # starts a real xrdp session in it
+nix build .#checks.x86_64-linux.spotibox-xrdp-audio          # an RDP client hears it, before and after a reconnect
 tools/closure.sh report                                      # what the production image is made of
 tools/closure.sh diff                                        # what the debug image adds on top of it
 tools/closure.sh why cups                                    # who is still holding on to a store path
@@ -1317,6 +1318,7 @@ tools/
 tests/
   spotibox-basic.nix       NixOS VM test: what the image contains
   xrdp-session.nix         NixOS VM test: a real xrdp session, X, keyboard, kiosk
+  xrdp-audio.nix           NixOS VM test: RDP audio at a real client, before and after a reconnect
   appliance-split.nix      evaluation-only guard for the prod/debug split
   closure-budget.nix       recorded production closure budget, enforced by CI
   image-budget.nix         recorded image and release sizes, enforced at release
