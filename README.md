@@ -1252,14 +1252,14 @@ has the full output):
 | closure, kernel | identical | sandboxed builds |
 | home seed, ext4 | identical | its UUID and hash seed are derived from machine and label (`tests/home-seed.nix` pins it) |
 | home seed, VHDX | 492 bytes differ | qemu-img: header sequence numbers, write GUIDs and checksums, the page 83 GUID, the log |
-| system image, ESP | 184 bytes differ | FAT directory timestamps, set by the build VM's clock |
-| system image, root ext4 | 1.11 GB differ | the same data in different places: 94.2% of its 334,515 non-zero blocks exist in both builds, just not at the same offsets |
+| system image, ESP | about 180 bytes differ | FAT directory timestamps, set by the build VM's clock |
+| system image, root ext4 | 1.1 to 1.4 GB differ, a different amount each time | the same data in different places: 94.2% of its ~334,500 non-zero blocks hold content the other build has too, just not at the same offsets |
 | system image, VHDX | BAT and payload differ | it carries the root filesystem |
 | `.gz` | identical from identical input | `pigz -n`, whatever the thread count |
 
 Before the home seed's identity was derived, mke2fs drew its UUID and hash seed
 at random, and since ext4 seeds its metadata checksums from the UUID that
-changed 6,298 bytes across 551 blocks, not 16.
+changed some 6,300 bytes across 551 blocks, not 16.
 
 The root filesystem is the one that decides the rest. make-disk-image formats
 it with a random hash seed, and the `tune2fs -U` that fixes its UUID keeps the

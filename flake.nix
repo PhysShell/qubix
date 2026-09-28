@@ -160,7 +160,7 @@
     # and the directory hash seed at random unless told otherwise, and ext4's
     # metadata checksums are seeded from the UUID, so a random one does not
     # change 16 bytes but every checksummed structure: two builds of one
-    # commit differed in 6,298 bytes across 551 blocks.  Both are derived from
+    # commit differed in some 6,300 bytes across 551 blocks.  Both are derived from
     # what the disk is instead - the machine and the label - and
     # SOURCE_DATE_EPOCH fixes the timestamps mke2fs writes, which stdenv
     # happens to set as well; tests/home-seed.nix pins the UUID.  The VHDX
