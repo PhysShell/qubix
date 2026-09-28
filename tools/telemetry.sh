@@ -42,9 +42,13 @@ if [ -n "$allow_dirty" ] && [ "$mode" != record ]; then
 fi
 
 # Headroom recorded on top of a fresh measurement, in percent.  Larger than
-# the closure gate's 2%: gzip output moves with the compressor's mood and a
-# dynamic VHDX allocates in extents, so image numbers are noisier than a
-# closure size, which is a sum of exact NAR sizes.
+# the closure gate's 2%, because the closure numbers repeat to the byte and
+# the image numbers do not: the images are not bit-reproducible.  qemu-img
+# writes fresh random GUIDs into every VHDX header and mkfs.ext4 picks a
+# random UUID, so two sandboxed recordings of one commit agreed on every
+# closure figure and on the VHDX's apparent size, and differed by 61,440
+# bytes of its allocation, 6,894 of the compressed image and 87 of the
+# compressed home seed.  An image figure here is one sample, not a constant.
 headroom_percent=5
 
 say() { [ "$mode" = json ] || echo "$@" >&2; }

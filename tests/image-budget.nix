@@ -6,22 +6,24 @@
 # what the VHDX costs the host - its apparent size, since qubixctl
 # writes it out in full - and what the release asset costs to download.
 # vhdxBuilderAllocatedBytes is the builder's sparse view of the same
-# file, not a host cost.  Re-record deliberately, from a commit, and say
-# why in the commit that follows.
+# file, not a host cost.  Re-record deliberately, and say why in the
+# commit that follows.  --record measures only from a commit, in a fresh
+# store with every build sandboxed: the numbers belong to the commit,
+# not to the machine that took them.
 {
   spotibox = {
     # What the numbers below were measured against.
     nixosVersion = "hyperv-25.11.20260501.26ef669";
-    rev = "a814ea70ca3087ad12a21fb42ffbcf723ffc36c3";
+    rev = "7cf3e813d742e41a284560b83dcc7858ceba7d8d";
 
-    closureBytes = { measured = 1222807776; max = 1283948164; };
+    closureBytes = { measured = 1222866800; max = 1284010140; };
     closurePaths = { measured = 579; max = 607; };
     kernelBytes = { measured = 24995768; max = 26245556; };
-    modulesBytes = { measured = 1791736; max = 1881322; };
-    initrdBytes = { measured = 23096904; max = 24251749; };
-    vhdxApparentBytes = { measured = 1736441856; max = 1823263948; };
-    vhdxBuilderAllocatedBytes = { measured = 1410531328; max = 1481057894; };
-    releaseBytes = { measured = 520362719; max = 546380854; };
-    homeReleaseBytes = { measured = 420861; max = 441904; };
+    modulesBytes = { measured = 1791416; max = 1880986; };
+    initrdBytes = { measured = 23092240; max = 24246852; };
+    vhdxApparentBytes = { measured = 1719664640; max = 1805647872; };
+    vhdxBuilderAllocatedBytes = { measured = 1410596864; max = 1481126707; };
+    releaseBytes = { measured = 520302296; max = 546317410; };
+    homeReleaseBytes = { measured = 420843; max = 441885; };
   };
 }
