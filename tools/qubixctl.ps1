@@ -1229,6 +1229,16 @@ function Invoke-QubixMain {
         # machines/*.nix are honoured without regenerating manifest.json first.
         Assert-WslAvailable
         $wsl = Resolve-WslRepoLocation -DistroOverride $WslDistro -LinuxPathOverride $RepoLinuxPath
+
+        # A WSL build uses whatever the checkout is at, and a stale checkout
+        # produces a stale image without complaint - a rebuild once came one
+        # elevation prompt away from shipping the repository's first commit.
+        # Name the revision before anything else happens, so a wrong one is
+        # visible in the first second instead of after a kernel compile.
+        $revision = Invoke-WslCapture -Distro $wsl.Distro -RepoPath $wsl.RepoPath `
+            -Script 'printf "%s @ %s" "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" "$(git describe --always --dirty 2>/dev/null)"'
+        Write-Host "=== Building from $($wsl.Distro):$($wsl.RepoPath)  [$revision] ===" -ForegroundColor Cyan
+
         $ctx.WslDistro = $wsl.Distro
         $ctx.RepoLinuxPath = $wsl.RepoPath
         $ctx.ImageSource = 'wsl'
