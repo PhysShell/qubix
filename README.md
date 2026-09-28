@@ -506,6 +506,7 @@ tools/cold-boot.sh                                           # boots the real VH
 tools/telemetry.sh                                           # image-level sizes against tests/image-budget.nix
 tools/closure.sh baseline                                    # re-record the closure budget: a commit, a fresh store, sandboxed
 tools/telemetry.sh --record                                  # re-record the image budget the same way
+tools/repro-census.sh                                        # builds each image twice, says which layer differs and where
 pwsh ./tests/qubixctl.Tests.ps1                              # controller unit checks
 pwsh ./tests/qubix-acceptance.Tests.ps1                      # acceptance harness, against stand-in Hyper-V cmdlets
 ```
@@ -1237,6 +1238,40 @@ Secure Boot is already off on the VM (`Set-VMFirmware -EnableSecureBoot Off`),
 so an unsigned UKI would boot; the work is the rest of the pipeline - image
 file name, manifest, `qubixctl`, the home disk and the release job.
 
+### Which Layers Reproduce
+
+The closure reproduces: two sandboxed builds, one of them CI's, agree on every
+path of it, the kernel included, to the byte. The release asset does not, and
+`tools/repro-census.sh` says where it stops. It builds each image twice from
+the same inputs, reads both VHDX files back to raw, and names the structure
+every differing byte sits in (`evidence/image-reproducibility-2026-09-28.txt`
+has the full output):
+
+| Layer | Two builds from the same inputs | Why |
+| --- | --- | --- |
+| closure, kernel | identical | sandboxed builds |
+| home seed, ext4 | identical | its UUID and hash seed are derived from machine and label (`tests/home-seed.nix` pins it) |
+| home seed, VHDX | 492 bytes differ | qemu-img: header sequence numbers, write GUIDs and checksums, the page 83 GUID, the log |
+| system image, ESP | 184 bytes differ | FAT directory timestamps, set by the build VM's clock |
+| system image, root ext4 | 1.11 GB differ | the same data in different places: 94.2% of its 334,515 non-zero blocks exist in both builds, just not at the same offsets |
+| system image, VHDX | BAT and payload differ | it carries the root filesystem |
+| `.gz` | identical from identical input | `pigz -n`, whatever the thread count |
+
+Before the home seed's identity was derived, mke2fs drew its UUID and hash seed
+at random, and since ext4 seeds its metadata checksums from the UUID that
+changed 6,298 bytes across 551 blocks, not 16.
+
+The root filesystem is the one that decides the rest. make-disk-image formats
+it with a random hash seed, and the `tune2fs -U` that fixes its UUID keeps the
+checksum seed of the random one it replaced, so directory and metadata blocks
+differ. The file data is laid out by `cptofs`, which writes through a kernel
+filesystem, and it lands somewhere else each time. So the VHDX differs in its
+block table and payload, not only in the GUIDs qemu-img writes, and a small
+tool that canonicalizes VHDX headers could not make the release reproducible.
+It was not written. A reproducible system image needs a builder that formats
+from a directory with fixed seeds, which the `image.repart` item under *TODO*
+is likely to bring.
+
 ### Nix-Generated JSON
 
 Nix is the source of truth for the manifest. `manifest.json` is the output of
@@ -1275,6 +1310,8 @@ tools/
   telemetry.sh             image-level size telemetry and budget, run at release
   lib/measure.sh           sandboxed builds and fresh stores, for closure.sh and telemetry.sh
   lib/sandbox-probe.nix    the build that proves the sandbox before a budget is recorded
+  lib/image-diff.py        names the VHDX, GPT, FAT or ext4 structure two images differ in
+  repro-census.sh          builds each image twice and says which layer is not reproducible
   qubix-acceptance.ps1     Hyper-V acceptance: Dynamic Memory, shutdown, KVP
   qubix-acceptance.cmd     elevating wrapper for it
 tests/
@@ -1284,10 +1321,12 @@ tests/
   closure-budget.nix       recorded production closure budget, enforced by CI
   image-budget.nix         recorded image and release sizes, enforced at release
   kernel-contract.nix      what the appliance kernel must and must not contain
+  home-seed.nix            pins the home seed's filesystem UUID, derived from machine and label
   qubixctl.Tests.ps1       controller unit checks
   qubix-acceptance.Tests.ps1  acceptance harness checks, against stand-in Hyper-V cmdlets
 evidence/
   hyperv-acceptance-2026-09-28.txt  the first green run on real Hyper-V, verbatim
+  image-reproducibility-2026-09-28.txt  tools/repro-census.sh output, before and after the home seed fix
 .github/workflows/
   ci.yml, release.yml
 ```
@@ -1326,7 +1365,10 @@ the experiment in a separate branch is what makes saying no cheap.
   KVM requirement from the release job - at the cost of a slightly larger
   download and a new boot path (UKI + systemd initrd). The shape is proven: it
   boots, mounts the store off `/dev/mapper/usr`, and brings xrdp up with no
-  failed units. What is not done is the pipeline around it.
+  failed units. What is not done is the pipeline around it. It is also the
+  likely way to a reproducible system image, which make-disk-image cannot give
+  (see *Which Layers Reproduce*): systemd-repart derives its UUIDs from a seed
+  and formats from a directory instead of through a mounted filesystem.
 - Spotify network lockdown via nftables, proxy or DNS allowlist.
 - PipeWire + EasyEffects experiment once xrdp audio is understood.
 - Hardening profile, possibly inspired by nix-mineral, applied carefully.
