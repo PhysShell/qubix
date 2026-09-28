@@ -31,9 +31,12 @@ home=$(nix build --no-link --print-out-paths ".#spotibox-home-vhdx")
 vhdx=$(find -L "$system" -name '*.vhdx' -print -quit)
 test -n "$vhdx" || { echo "no .vhdx in $system" >&2; exit 1; }
 
-read -r ovmf qemu < <(nix build --no-link --print-out-paths \
+# One read per line: `read` fails at an end of input that has no newline, and
+# under `set -e` a single read of both paths joined on one line ended the
+# script right here.
+{ read -r ovmf; read -r qemu; } < <(nix build --no-link --print-out-paths \
   --impure --expr 'let p = (builtins.getFlake (toString ./.)).nixosConfigurations.spotibox.pkgs;
-                   in [ p.OVMF.fd p.qemu_kvm ]' | tr '\n' ' ')
+                   in [ p.OVMF.fd p.qemu_kvm ]')
 
 cp "$ovmf/FV/OVMF_VARS.fd" "$work/vars.fd"
 chmod +w "$work/vars.fd"
