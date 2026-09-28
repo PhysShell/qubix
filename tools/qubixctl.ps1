@@ -365,8 +365,12 @@ function Build-QubixImagesInWsl {
     $package = [string](Get-Prop $Config 'package')
     $homePackage = [string](Get-Prop $Config 'homePackage' '')
 
+    # Each image gets a GC root of its own.  Both builds used to share
+    # `result`, so after a recreate only the home seed was rooted, and a
+    # nix-collect-garbage in WSL took the system image with it - the kernel
+    # inside it included, which is most of an hour to compile again.
     Write-Host "=== Building .#$package in WSL distro '$Distro' ==="
-    Invoke-WslInteractive -Distro $Distro -RepoPath $RepoPath -Script "nix build -L .#$package"
+    Invoke-WslInteractive -Distro $Distro -RepoPath $RepoPath -Script "nix build -L --out-link result-$package .#$package"
 
     # --print-out-paths gives the absolute store path; wslpath -w and Copy-Item
     # need absolute paths, and the 'result' symlink would resolve relative to /.
@@ -379,7 +383,7 @@ function Build-QubixImagesInWsl {
     $homeWindows = ''
     if ($homePackage) {
         Write-Host "=== Building .#$homePackage in WSL distro '$Distro' ==="
-        Invoke-WslInteractive -Distro $Distro -RepoPath $RepoPath -Script "nix build -L .#$homePackage"
+        Invoke-WslInteractive -Distro $Distro -RepoPath $RepoPath -Script "nix build -L --out-link result-$homePackage .#$homePackage"
         $homeLinux = Invoke-WslCapture -Distro $Distro -RepoPath $RepoPath `
             -Script "nix build --no-link --print-out-paths .#$homePackage | tr -d '\r'"
         $homeWindows = Convert-LinuxPathToWindows -Distro $Distro -LinuxPath $homeLinux

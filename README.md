@@ -186,6 +186,17 @@ unchecked until a PR exists - open one early if you want the signal.
 | `controller lint + unit checks (powershell)` | windows | unit checks under Windows PowerShell 5.1, the shell `qubix-up.cmd` actually uses |
 | `controller lint + unit checks (pwsh)` | windows | the same checks under pwsh 7, plus PSScriptAnalyzer |
 
+**The binary cache.** The appliance kernel is compiled from source - no
+upstream cache has this configuration - which takes about 26 minutes on a
+runner. The closure budget job and the release job pull from the public
+Cachix cache `physshell`, and after their builds push exactly two paths: the
+kernel's `out` and `modules` outputs, 25 MiB that refer to nothing else. So a
+kernel is compiled once per configuration rather than once per push. Nothing
+else goes in, deliberately: the cache is public, `cachix-action`'s own push
+sends whole closures, and the toplevel's closure holds Spotify, which nixpkgs
+marks unfree and not redistributable. Pushing needs a `CACHIX_AUTH_TOKEN`
+repository secret; without one - on forks, for instance - the jobs only read.
+
 Driving it from the terminal with the GitHub CLI:
 
 ```bash
@@ -431,6 +442,26 @@ $Qubix = "\\wsl.localhost\NixOS\home\nixos\Documents\repos\qubix"
 With `-ImageSource wsl` the controller derives the distro and Linux path from
 the UNC path (override with `-WslDistro` / `-RepoLinuxPath`), regenerates the
 manifest from Nix, builds both images and copies them out of the store.
+It leaves `result-spotibox-vhdx` and `result-spotibox-home-vhdx` in the
+checkout as GC roots, so `nix-collect-garbage` keeps the last build - kernel
+included - instead of sending the next `recreate` back to compiling it.
+
+The binary cache CI fills (see *Continuous Integration*) serves local builds
+too: a kernel CI has already compiled downloads in seconds instead of taking
+most of an hour. On NixOS-WSL, in the system configuration, then
+`sudo nixos-rebuild switch`:
+
+```nix
+nix.settings = {
+  extra-substituters = [ "https://physshell.cachix.org" ];
+  extra-trusted-public-keys = [
+    "physshell.cachix.org-1:JX0coz2i80gA+E0MVCbsvnT25VezCA5uw67JUaLiKyI="
+  ];
+};
+```
+
+It is not in `flake.nix` as `nixConfig`: Nix asks before applying a flake's
+settings, and the controller's calls into WSL cannot answer.
 
 The `.cmd` wrappers run PowerShell with a process-scoped
 `-ExecutionPolicy Bypass`, which also sidesteps Windows treating scripts under

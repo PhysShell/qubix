@@ -20,6 +20,9 @@ jobs:
   build:
     name: build and publish images
     runs-on: ubuntu-latest
+    env:
+      # For the push step's condition: `if:` cannot read secrets directly.
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,8 +47,26 @@ jobs:
           extra-conf: |
             system-features = nixos-test benchmark big-parallel kvm
 
+      # Pull only, for the reason given in ci.yml: a closure push from here
+      # would publish Spotify.  The kernel is usually already there from the
+      # pull request that changed it.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: physshell
+          skipPush: true
+
       - name: Build release bundle
         run: nix build .#spotibox-release -L --out-link release
+
+      # The same two outputs ci.yml pushes, for a tag whose kernel no pull
+      # request built.
+      - name: Push the appliance kernel to the binary cache
+        if: env.CACHIX_AUTH_TOKEN != ''
+        run: |
+          kernel='.#nixosConfigurations.spotibox.config.boot.kernelPackages.kernel'
+          cachix push physshell \
+            "$(nix eval --raw "$kernel.outPath")" \
+            "$(nix eval --raw "$kernel.modules.outPath")"
 
       - name: Inspect assets
         run: |
