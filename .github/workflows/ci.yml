@@ -77,8 +77,14 @@ jobs:
           if ($results.Count -gt 0) { exit 1 }
 
       - name: unit checks
+        # A suite that passes never calls exit, so $LASTEXITCODE keeps
+        # whatever it held before - nothing, in a fresh shell, and
+        # `$null -ne 0` is true: the old per-suite check ran `exit $null`,
+        # which is exit 0, after the first suite and skipped the rest.
+        # Hence a reset before each one.
         run: |
-          & ./tests/qubixctl.Tests.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & ./tests/qubix-acceptance.Tests.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($suite in './tests/qubixctl.Tests.ps1', './tests/qubix-acceptance.Tests.ps1') {
+            $global:LASTEXITCODE = 0
+            & $suite
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
