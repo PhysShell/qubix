@@ -667,7 +667,9 @@ purpose NixOS box. Measured with `tools/closure.sh` against nixpkgs 25.11:
 | `lsvmbus`, and with it the last Python interpreter (see below) | -108 MiB |
 | a kernel built for one machine instead of for all of them (see below) | -118 MiB |
 | the subsystems that machine cannot have: sound, radios, GPUs, KVM | -7 MiB |
-| **production total** | **1.15 GiB (-70.0%)**, 1024 store paths down to 584 |
+| sudo, once no account was left in `wheel` | -6 MiB |
+| the ALSA-to-PulseAudio bridge, and the ffmpeg 8 only it was holding (see below) | -34 MiB |
+| **production total** | **1.11 GiB (-71.1%)**, 1024 store paths down to 572 |
 
 Three of those were never asked for by anything in the appliance:
 
@@ -1100,6 +1102,53 @@ switch either off; `environment.corePackages` would have to be replaced with an
 allowlist, and that is a separate experiment - system scripts expect GNU
 semantics, and "it still boots" is not the same as "nothing broke".
 
+### The ALSA Bridge Nothing Crosses
+
+Enabling PulseAudio on NixOS also writes `/etc/alsa/conf.d/99-pulseaudio.conf`,
+which makes `pcm.default` and `ctl.default` alsa-plugins' `pulse` types: a
+program written against ALSA opens the default device and plays into
+PulseAudio. That file was the production image's only reference to
+alsa-plugins, and alsa-plugins its only reference to ffmpeg 8 - linked by the
+`a52` encoder and the `lavrate` resampler, two plugins no configuration here
+names. The whole chain, and what left with it:
+
+```text
+toplevel -> etc -> etc-alsa-conf.d-99-pulseaudio.conf -> alsa-plugins-1.2.12
+         -> ffmpeg-8.0-lib -> ffmpeg-8.0-data, libva, libvdpau, openapv
+
+  ffmpeg-8.0-lib        33,821,496     libva-2.22.0             353,792
+  openapv-0.2.0.4          726,200     ffmpeg-8.0-data          279,344
+  alsa-plugins-1.2.12      390,456     libvdpau-1.5             103,728
+                                       the file itself              528
+
+  closure, before and after, each measured in a fresh sandboxed store:
+  1,222,866,800 -> 1,187,190,640 bytes (-35,676,160), 579 -> 572 paths
+```
+
+The ffmpeg 4 that stays is Spotify's own - nixpkgs links it next to the client
+because Spotify wants a libavcodec older than 59 - and is a separate question.
+
+Nothing on this machine crosses the bridge. The production kernel has no sound
+support, so there is no ALSA device for a program to reach, bridged or not.
+xrdp's sink is a PulseAudio module. The one program here with an ALSA driver is
+Spotify, and as of 1.2.74 it constructs its PulseAudio driver first -
+`dlopen("libpulse.so.0")`, which its wrapper puts on the library path, the
+symbols, a threaded main loop, `pa_context_connect` - and builds the ALSA driver
+only when that fails; if ALSA fails as well, it logs "Unable to initialize
+sounddriver, using dummy." The only road to the ALSA driver is a PulseAudio
+that cannot be reached, and a bridge into PulseAudio cannot reach it either.
+
+`tests/xrdp-audio.nix` is the acceptance the TODO list asked for: a FreeRDP
+client connects to the appliance, the session's PulseAudio plays through xrdp's
+sink, and the client has to receive PCM; then it disconnects, reconnects and
+has to receive it again. It passes with the bridge and without it, and the
+image without it cold-boots under OVMF to an RDP answer (`tools/cold-boot.sh`).
+What no VM test here can do is log in to Spotify, so the last word is a track
+playing on real Hyper-V, through a reconnect.
+
+The debug image keeps the file, next to the stock kernel with ALSA and the
+alsa-utils it also keeps.
+
 ### Why The Image Is ext4, And What Compression Would Buy
 
 The store compresses about two and a half to one, measured rather than
@@ -1343,18 +1392,10 @@ spending that. If it turns out that saving 23 MiB of language tables costs a
 three-storey GTK override to carry forever, the right answer is no, and having
 the experiment in a separate branch is what makes saying no cheap.
 
-- `alsa-plugins` pulls a full ffmpeg 8 (32 MiB) into an appliance that already
-  carries ffmpeg 4 for Spotify, and the production audio path never touches
-  the ALSA device layer at all - traced on a running kiosk, no `snd` module is
-  loaded and `/proc/asound` does not exist. The causal chain is short enough
-  to look like a clean override. Acceptance has to include Spotify playing
-  through RDP audio *after a reconnect*, because dependencies like this have a
-  habit of being unnecessary right up to the first fallback codec.
 - GTK3 pulls `iso-codes` (23 MiB) for a language list the kiosk never shows.
-  Harder: GTK may reach that data through localised country and language names
-  rather than through a visible picker, so the likely outcome is a patch to
-  carry rather than an option to set. Second, and only if the first one went
-  well.
+  Harder than the ALSA bridge was: GTK may reach that data through localised
+  country and language names rather than through a visible picker, so the
+  likely outcome is a patch to carry rather than an option to set.
 - The next kernel change, whenever it comes, is also the time to spend the
   rebuild on `THUNDERBOLT = no` becoming `USB4 = no` and on the seven `extra`
   requests in `tests/kernel-contract.nix`, device-mapper included unless the
