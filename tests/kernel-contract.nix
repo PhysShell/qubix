@@ -86,11 +86,16 @@ let
     NET_9P = "profiles/qemu-guest.nix - the store is mounted over 9p";
     "9P_FS" = "the store is mounted over 9p, filesystem end";
 
-    # Dynamic Memory: hv_balloon hands the guest new memory blocks, the udev
-    # rules copied into profiles/modes/prod.nix online them, and neither works
-    # without this.  Inherited from the architecture default rather than set
-    # here, which is exactly why it is worth asserting.
+    # Dynamic Memory: hv_balloon hands the guest new memory blocks and the
+    # kernel onlines them on the spot; the udev rules copied into
+    # profiles/modes/prod.nix only matter on a kernel that would leave them
+    # offline.  All three are inherited rather than set here, which is exactly
+    # why they are worth asserting - and this is the only place onlining is
+    # checked at all: the host sees it at most as a jump in the guest's
+    # reported demand, which tools/qubix-acceptance.ps1 records and does not
+    # judge.
     MEMORY_HOTPLUG = "Hyper-V Dynamic Memory";
+    MEMORY_HOTPLUG_DEFAULT_ONLINE = "hot-added memory is usable without waiting for udev";
     MEMORY_HOTREMOVE = "Hyper-V Dynamic Memory, the other direction";
     NET_9P_VIRTIO = "profiles/qemu-guest.nix";
     SATA_AHCI = "tools/cold-boot.sh attaches the VHDX to an AHCI port";

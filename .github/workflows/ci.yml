@@ -80,3 +80,5 @@ jobs:
         run: |
           & ./tests/qubixctl.Tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./tests/qubix-acceptance.Tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

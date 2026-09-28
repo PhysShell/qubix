@@ -229,17 +229,29 @@ is no VMBus at all - and this appliance's kernel now has no hardware story
 than what nixpkgs ships. Three claims rest on that and nothing here can reach
 them:
 
-- **Dynamic Memory.** `hv_balloon` is in the initrd and the hot-add udev rules
-  are copied verbatim into `profiles/modes/prod.nix`, but nothing has watched
-  the host hand this guest a memory block and seen the guest bring it online.
-  The script raises the VM's minimum above what it currently has and waits for
-  `MemoryAssigned` to follow, which tests the driver and the udev rules
-  together.
-- **Host-requested shutdown.** `Stop-VM` without `-Force` goes through the
-  shutdown integration service. There is no userspace daemon in that path -
-  `hv_utils` answers it in the kernel by calling `orderly_poweroff()` - which
-  is exactly why dropping `hv_vss_daemon` and `hv_fcopy_uio_daemon` is
-  supposed to be safe, and exactly what has not been observed.
+- **Dynamic Memory.** `hv_balloon` is built into the kernel and the hot-add
+  udev rules are copied verbatim into `profiles/modes/prod.nix`, but nothing
+  has watched the host hand this guest a memory block. Memory above startup
+  can only arrive by hot-add, so the script makes the host want more than
+  startup and waits for `MemoryAssigned` to cross it. It does that through the
+  memory buffer: on a running VM the minimum can only go down, and never above
+  startup, while the buffer is free to move. (The first version raised the
+  minimum, which Hyper-V refuses.) Whether the new blocks come online is the
+  kernel's own business - `MEMORY_HOTPLUG_DEFAULT_ONLINE`, pinned by the
+  kernel contract, because the host cannot see it: offline hot-added pages
+  show up at most as a jump in the guest's reported demand, which `hv_balloon`
+  counts them into, and the evidence records that series without judging it.
+  A host with less memory free than the hot-add needs gets a SKIP, not a FAIL:
+  that says nothing about the guest, and it is not a pass either.
+- **Host-requested shutdown.** The request goes to the shutdown integration
+  service, and there is no userspace daemon in that path - `hv_utils` answers
+  it in the kernel by calling `orderly_poweroff()` - which is exactly why
+  dropping `hv_vss_daemon` and `hv_fcopy_uio_daemon` is supposed to be safe,
+  and exactly what has not been observed. The script sends it through
+  `Msvm_ShutdownComponent.InitiateShutdown`, the service's own WMI method,
+  rather than `Stop-VM`: the method answers with a numeric code and returns,
+  while `Stop-VM` blocks until the guest is off - a guest that accepted and
+  then hung would hang the run with it.
 - **KVP.** `hv_kvp_daemon` is the one Integration Service that was kept, on
   the grounds that `Get-QubixAddress` falls back to it for machines without a
   static IP. That fallback has never been watched working on a build where the
@@ -251,15 +263,27 @@ that the guest came back on the *same* static address both times - a cheap
 check that catches persistent network state going strange across a
 shutdown/hot-add cycle.
 
-Three things it deliberately does not do. It never rescues a failed shutdown
-with `Stop-VM -Force`: the VM is left running and the run ends FAIL, because
-forcing it off would delete the only evidence of the failure the check exists
-to find. It never accepts an open TCP port as proof of xrdp - it sends an
-X.224 connection request and insists on a TPKT reply, the same handshake
-`tools/cold-boot.sh` uses. And it never asserts that the host can see *some*
-address: it waits for the expected one, ignoring IPv6 and link-local, because
-a guest answering with an address it invented itself proves nothing about the
-static configuration.
+Four things it deliberately does not do. It never rescues a failed shutdown
+with `Stop-VM -Force` or anything like it: the VM is left running and the run
+ends FAIL, because forcing it off would delete the only evidence of the
+failure the check exists to find. It never accepts an open TCP port as proof
+of xrdp - it sends an X.224 connection request and insists on a TPKT reply,
+the same handshake `tools/cold-boot.sh` uses. It never asserts that the host
+can see *some* address: it waits for the expected one, ignoring IPv6 and
+link-local, because a guest answering with an address it invented itself
+proves nothing about the static configuration.
+
+And it never compares text the host translates. The first run on a real host
+died at the third check: the host was Russian, and
+`Get-VMIntegrationService -Name 'Shutdown'` matches the service's *translated*
+display name. Integration services are now found by WMI class and GUID,
+statuses are enums and numeric codes, and durations are written in the
+invariant culture. `tests/qubix-acceptance.Tests.ps1` runs the whole script
+against stand-in Hyper-V cmdlets that answer in Russian under a culture that
+writes decimal commas, and fails if either script looks an integration service
+up by name again. That run also lost the two checks it had finished, because
+the exception ended it before the evidence was written. A harness error is now
+a row in the table like any other, and the file is written regardless.
 
 Running it, from the Windows host with the VM already created by
 `qubixctl` - it needs an existing VM, because what it tests is a machine in
@@ -296,10 +320,12 @@ Nothing else has to be enabled first:
 Dynamic Memory on between 1 and 6 GiB, which is what the memory checks need.
 Expect four or five minutes, most of it the two cold boots.
 
-Everything is timed, and the evidence is written out: image
-revision, Hyper-V host and OS build, VM generation and configuration version,
-the memory hot-add as a time series of assigned and demanded megabytes, a
-result and a duration per check, and a verdict. Keep it with the release.
+Everything is timed, and the evidence is written out: image revision, the
+harness's own hash, Hyper-V host and OS build, VM generation and
+configuration version, the integration services as the host reports them,
+the memory hot-add as a time series of assigned, demanded and host-free
+megabytes, a result and a duration per check, and a verdict. Keep it with the
+release.
 A hot-add that takes 55 seconds instead of 4 after some future Hyper-V or
 kernel update is exactly the kind of degradation that creeps in quietly, and
 there is no way to notice it without the earlier number to compare against.
@@ -397,6 +423,7 @@ tools/closure.sh check                                       # the CI closure ga
 tools/cold-boot.sh                                           # boots the real VHDX through OVMF, ESP and all
 tools/telemetry.sh                                           # image-level sizes against tests/image-budget.nix
 pwsh ./tests/qubixctl.Tests.ps1                              # controller unit checks
+pwsh ./tests/qubix-acceptance.Tests.ps1                      # acceptance harness, against stand-in Hyper-V cmdlets
 ```
 
 Manual acceptance on Windows:
@@ -1142,6 +1169,7 @@ tests/
   image-budget.nix         recorded image and release sizes, enforced at release
   kernel-contract.nix      what the appliance kernel must and must not contain
   qubixctl.Tests.ps1       controller unit checks
+  qubix-acceptance.Tests.ps1  acceptance harness checks, against stand-in Hyper-V cmdlets
 .github/workflows/
   ci.yml, release.yml
 ```
