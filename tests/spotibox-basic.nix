@@ -19,16 +19,49 @@ pkgs.testers.nixosTest {
     machine.wait_for_unit("multi-user.target")
 
     machine.succeed("test $(hostname) = spotibox")
-    machine.succeed("test $(id -u user) = 1000")
+    # One account, no privileges.  `user` is the interactive login and lives
+    # on debug images only; `rdp` keeps uid 1001 either way, because /home
+    # outlives the system image and has to agree about who owns what.
     machine.succeed("test $(id -u rdp) = 1001")
+    machine.fail("id -u user")
+    machine.succeed("test -z \"$(id -nG rdp | tr ' ' '\\n' | grep -x wheel)\"")
+    machine.succeed("test -z \"$(getent group wheel | cut -d: -f4)\"")
+    machine.fail("command -v sudo")
     machine.succeed("command -v spotify")
     machine.succeed("command -v openbox-session")
-    machine.succeed("command -v pavucontrol")
     machine.succeed("systemctl is-enabled xrdp")
-    machine.succeed("systemctl is-enabled avahi-daemon")
 
-    # The xrdp session must be the Spotify kiosk session, not a bare WM.
-    machine.succeed("grep -q spotibox-session /etc/xrdp/startwm.sh")
+    # /etc is an overlayfs and the users were created by userborn: both come
+    # from dropping the Perl activation scripts.
+    machine.succeed("findmnt -no FSTYPE /etc | grep -q overlay")
+    machine.succeed("systemctl show -p Result userborn.service | grep -q success")
+
+    # The xrdp session must be the Spotify kiosk session, not a bare WM.  What
+    # startwm.sh names is the keyboard wrapper from profiles/remote/xrdp.nix,
+    # and the wrapper is what execs the kiosk session, so the check has to
+    # follow both links - grepping startwm.sh for the session name alone
+    # silently stopped meaning anything when the wrapper was introduced.
+    wrapper = machine.succeed(
+        "grep -o '/nix/store/[^ ]*-qubix-xrdp-session' /etc/xrdp/startwm.sh"
+    ).strip()
+    machine.succeed(f"grep -q spotibox-session {wrapper}")
     machine.succeed("grep -q 'class=\"Spotify\"' /etc/qubix/openbox-rc.xml")
+
+    # This is a production image: everything that only exists to debug the
+    # appliance has to be missing from it, because anything still present is
+    # also still in the closure.  The debug image keeps all of it; see
+    # tests/appliance-split.nix for the evaluation-level version of this.
+    machine.fail("command -v xterm")
+    machine.fail("command -v pavucontrol")
+    machine.fail("command -v alsamixer")
+    machine.fail("command -v strace")
+    machine.fail("command -v nixos-rebuild")
+    machine.fail("command -v man")
+
+    # The kiosk session comes from xrdp; nothing greets anybody locally.
+    machine.fail("systemctl is-enabled display-manager.service")
+
+    # Nothing announces itself on a network with a static address.
+    machine.fail("systemctl is-enabled avahi-daemon")
   '';
 }

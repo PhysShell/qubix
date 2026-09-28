@@ -35,11 +35,20 @@
     # VHDX (root filesystem, growPartition, Hyper-V guest services included).
     evalMachine = modules: lib.nixosSystem {
       inherit system pkgs;
-      modules = modules ++ [
-        "${nixpkgs}/nixos/modules/virtualisation/hyperv-image.nix"
-      ];
+      modules = modules ++ imageModules;
       specialArgs = { inherit self; };
     };
+
+    # The upstream Hyper-V image module plus Qubix's override of it (see
+    # profiles/image/hyperv.nix).  Both the `nixosConfigurations.*` evaluation
+    # and the nixos-generators build path have to see the same pair, or the
+    # VHDX would stop matching the config the manifest and the tests describe.
+    # nixos-generators imports the upstream module itself; Nix keys modules by
+    # path, so naming it twice is free.
+    imageModules = [
+      "${nixpkgs}/nixos/modules/virtualisation/hyperv-image.nix"
+      ./profiles/image/hyperv.nix
+    ];
 
     # Extract network-related manifest fields from an evaluated NixOS config.
     # Returns an empty attrset when no static IP is configured (DHCP mode).
@@ -69,7 +78,17 @@
       # Used in DHCP mode; ignored when staticIp is present.
       switchName = "Default Switch";
       cpuCount           = 2;
-      memoryStartupBytes = 4294967296;
+
+      # Startup, not "how much it needs".  Hyper-V has to find the whole
+      # startup amount before the guest exists, and only then does Dynamic
+      # Memory - which qubixctl enables between 1 and this maximum - let
+      # hv_balloon give the surplus back.  A 4 GiB floor is what a host with
+      # other things running refuses first, and the appliance does not want
+      # it: tests/xrdp-session.nix brings up Xorg under xrdp, Openbox and
+      # Spotify with its window mapped and maximised in a 2 GiB VM, which is
+      # the whole kiosk.  The maximum stays at 6 GiB because Spotify's cache
+      # is what grows, and growing is what Dynamic Memory is for.
+      memoryStartupBytes = 2147483648;
       maxMemoryBytes     = 6442450944;
       vmRoot    = "C:\\HyperV\\Qubix";
       wslDistro = "NixOS";
@@ -115,7 +134,7 @@
         inherit system pkgs lib;
         nixosSystem = lib.nixosSystem;
         format = "hyperv";
-        modules = modules;
+        modules = modules ++ imageModules;
         specialArgs = {
           inherit self;
         };
@@ -180,12 +199,41 @@
 
       qubix-manifest-json = manifestJson;
 
+      # The systems the images are made of.  A VHDX is its `toplevel` closure
+      # plus a filesystem around it, and toplevel builds without KVM, so this
+      # is what `tools/closure.sh` measures and what the CI closure budget
+      # gates on.  It is also the fastest way to check "does this change even
+      # build" without waiting for an image.
+      spotibox-toplevel       = spotibox.config.system.build.toplevel;
+      spotibox-debug-toplevel = spotiboxDebug.config.system.build.toplevel;
+
       default = self.packages.${system}.spotibox-vhdx;
     };
 
-    checks.${system}.spotibox-basic =
-      import ./tests/spotibox-basic.nix {
-        inherit pkgs;
-      };
+    checks.${system} = {
+      spotibox-basic =
+        import ./tests/spotibox-basic.nix {
+          inherit pkgs;
+        };
+
+      spotibox-appliance-split =
+        import ./tests/appliance-split.nix {
+          inherit pkgs lib;
+          prod = spotibox.config;
+          debug = spotiboxDebug.config;
+        };
+
+      spotibox-xrdp-session =
+        import ./tests/xrdp-session.nix {
+          inherit pkgs;
+        };
+
+      spotibox-kernel-contract =
+        import ./tests/kernel-contract.nix {
+          inherit pkgs lib;
+          prod = spotibox.config;
+          debug = spotiboxDebug.config;
+        };
+    };
   };
 }

@@ -49,7 +49,12 @@ WSL is not required on the host. It stays available as the developer loop
 - Separate `user` and `rdp` accounts (pinned UIDs) to avoid session
   cross-contamination.
 - A NixOS smoke test for users, xrdp, Spotify, Openbox, Avahi and the kiosk
-  session wiring.
+  session wiring - and for what the production image must *not* contain.
+- A production/debug split that is enforced rather than aspirational:
+  `qubix.mode` decides, `tests/appliance-split.nix` fails the build when a
+  debugging tool reappears in the appliance, and `tools/closure.sh` holds the
+  production image to a closure budget in CI. That took 2.2 GiB (57%) out of
+  the image; see *Closure Budget*.
 
 ## Quick Start (Windows, No WSL)
 
@@ -177,6 +182,7 @@ unchecked until a PR exists - open one early if you want the signal.
 | Job | Runner | What it does |
 | --- | --- | --- |
 | `flake check, manifest sync, home seed` | ubuntu | `nix flake check`, fails on `manifest.json` drift, builds the home seed |
+| `production closure budget` | ubuntu | builds `system.build.toplevel`, fails when the appliance grows past `tests/closure-budget.nix` or starts carrying a nixpkgs channel again |
 | `controller lint + unit checks (powershell)` | windows | unit checks under Windows PowerShell 5.1, the shell `qubix-up.cmd` actually uses |
 | `controller lint + unit checks (pwsh)` | windows | the same checks under pwsh 7, plus PSScriptAnalyzer |
 
@@ -201,6 +207,179 @@ nix run nixpkgs#actionlint
 
 `actionlint` catches the whole class of errors GitHub reports only as a failed
 run, such as using a context where none is allowed.
+
+## Release Readiness
+
+A tag is not a size milestone; it is a claim that the appliance still works.
+These five have to be green before one, and the middle two are the only ones
+this repository cannot produce on its own:
+
+| Gate | How | Where |
+| --- | --- | --- |
+| OVMF acceptance | `tools/cold-boot.sh` - firmware, boot loader, root and home filesystems, static address, an RDP reply | anywhere with QEMU |
+| Contract | `nix flake check` - the prod/debug split, the kernel contract, both VM tests | CI, and locally |
+| **Real Hyper-V cold boot** | `tools\qubix-acceptance.cmd` | the Hyper-V host, by hand |
+| **Hyper-V integration checks** | the same script: Dynamic Memory, host-requested shutdown, KVP | the Hyper-V host, by hand |
+| Size telemetry | `tools/telemetry.sh`, recorded against `tests/image-budget.nix` | the release job |
+
+The two in bold are the standing gap. `tools/cold-boot.sh` proves the kernel
+and userspace did not fall over, but it runs under OVMF and QEMU, where there
+is no VMBus at all - and this appliance's kernel now has no hardware story
+*except* VMBus, while its Integration Services are a hand-picked subset rather
+than what nixpkgs ships. Three claims rest on that and nothing here can reach
+them:
+
+- **Dynamic Memory.** `hv_balloon` is built into the kernel and the hot-add
+  udev rules are copied verbatim into `profiles/modes/prod.nix`, but nothing
+  has watched the host hand this guest a memory block. Memory above startup
+  can only arrive by hot-add, so the script makes the host want more than
+  startup and waits for `MemoryAssigned` to cross it. It does that through the
+  memory buffer: on a running VM the minimum can only go down, and never above
+  startup, while the buffer is free to move. (The first version raised the
+  minimum, which Hyper-V refuses.) Whether the new blocks come online is the
+  kernel's own business - `MEMORY_HOTPLUG_DEFAULT_ONLINE`, pinned by the
+  kernel contract, because the host cannot see it: offline hot-added pages
+  show up at most as a jump in the guest's reported demand, which `hv_balloon`
+  counts them into, and the evidence records that series without judging it.
+  A host with less memory free than the hot-add needs gets a SKIP, not a FAIL:
+  that says nothing about the guest, and it is not a pass either.
+- **Host-requested shutdown.** The request goes to the shutdown integration
+  service, and there is no userspace daemon in that path - `hv_utils` answers
+  it in the kernel by calling `orderly_poweroff()` - which is exactly why
+  dropping `hv_vss_daemon` and `hv_fcopy_uio_daemon` is supposed to be safe,
+  and exactly what has not been observed. The script sends it through
+  `Msvm_ShutdownComponent.InitiateShutdown`, the service's own WMI method,
+  rather than `Stop-VM`: the method answers with a numeric code and returns,
+  while `Stop-VM` blocks until the guest is off - a guest that accepted and
+  then hung would hang the run with it.
+- **KVP.** `hv_kvp_daemon` is the one Integration Service that was kept, on
+  the grounds that `Get-QubixAddress` falls back to it for machines without a
+  static IP. That fallback has never been watched working on a build where the
+  other two daemons are gone.
+
+The script finishes with a second cold boot, because a shutdown that
+corrupted the root filesystem shows up there and nowhere else, and it checks
+that the guest came back on the *same* static address both times - a cheap
+check that catches persistent network state going strange across a
+shutdown/hot-add cycle.
+
+Four things it deliberately does not do. It never rescues a failed shutdown
+with `Stop-VM -Force` or anything like it: the VM is left running and the run
+ends FAIL, because forcing it off would delete the only evidence of the
+failure the check exists to find. It never accepts an open TCP port as proof
+of xrdp - it sends an X.224 connection request and insists on a TPKT reply,
+the same handshake `tools/cold-boot.sh` uses. It never asserts that the host
+can see *some* address: it waits for the expected one, ignoring IPv6 and
+link-local, because a guest answering with an address it invented itself
+proves nothing about the static configuration.
+
+And it never compares text the host translates. The first run on a real host
+died at the third check: the host was Russian, and
+`Get-VMIntegrationService -Name 'Shutdown'` matches the service's *translated*
+display name. Integration services are now found by WMI class and GUID,
+statuses are enums and numeric codes, and durations are written in the
+invariant culture. `tests/qubix-acceptance.Tests.ps1` runs the whole script
+against stand-in Hyper-V cmdlets that answer in Russian under a culture that
+writes decimal commas, and fails if either script looks an integration service
+up by name again. That run also lost the two checks it had finished, because
+the exception ended it before the evidence was written. A harness error is now
+a row in the table like any other, and the file is written regardless.
+
+Running it, from the Windows host with the VM already created by
+`qubixctl` - it needs an existing VM, because what it tests is a machine in
+the state the controller leaves behind:
+
+First make sure WSL is actually on the revision you mean to test - `recreate
+-ImageSource wsl` builds from whatever the checkout is at, and an old checkout
+produces an old image without saying so:
+
+```bash
+cd ~/Documents/repos/qubix
+git fetch origin && git checkout <branch> && git pull --ff-only
+git rev-parse --short HEAD          # this is what you are about to ship
+```
+
+Then, from an **elevated** PowerShell on the host - `recreate` changes Hyper-V
+state and `qubixctl.cmd` does not elevate on its own:
+
+```powershell
+# repo in WSL: assign the UNC path, do not cd into it
+$Qubix = "\\wsl.localhost\NixOS\home\nixos\Documents\repos\qubix"
+
+& "$Qubix\tools\qubixctl.cmd" -Command recreate -ImageSource wsl   # put this build on the VM
+& "$Qubix\tools\qubix-acceptance.cmd"                              # then check it
+```
+
+`qubix-acceptance.cmd` elevates on its own if you start it from an ordinary
+shell, and passes arguments through in both directions; run from an already
+elevated one it just runs. Nix writes its build progress to stderr, and
+Windows PowerShell turns every such line into a red `NativeCommandError`
+record - that is noise, not failure. The real verdict is the last line.
+Nothing else has to be enabled first:
+`qubixctl` already creates the VM as generation 2, with Secure Boot off and
+Dynamic Memory on between 1 and 6 GiB, which is what the memory checks need.
+Expect four or five minutes, most of it the two cold boots.
+
+Everything is timed, and the evidence is written out: image revision, the
+harness's own hash, Hyper-V host and OS build, VM generation and
+configuration version, the integration services as the host reports them,
+the memory hot-add as a time series of assigned, demanded and host-free
+megabytes, a result and a duration per check, and a verdict. Keep it with the
+release.
+A hot-add that takes 55 seconds instead of 4 after some future Hyper-V or
+kernel update is exactly the kind of degradation that creeps in quietly, and
+there is no way to notice it without the earlier number to compare against.
+
+### Baseline: 2026-09-28
+
+The first run that went green on a real host is kept verbatim in
+`evidence/hyperv-acceptance-2026-09-28.txt`. It checked image 43b639e, and
+nothing since has changed the image derivations. The harness was a4085e5's,
+which hashes to `sha256:9b03f08f2f19d19c`; the file says `unknown` because
+reading its own script back failed on Windows PowerShell 5.1, which 2bcfa12
+fixed. The host was Windows 11 build 26200 with a Russian UI, the VM
+generation 2 at configuration version 12.0.
+
+| Check | Took | What it showed |
+| --- | --- | --- |
+| cold boot #1 | 44.9 s | power-on to an X.224 reply; Hyper-V logs the OS as loaded at +5 s (event 18601), so about 40 s are the guest's own boot |
+| KVP expected IPv4 | 0.2 s | the static address, as soon as xrdp answered |
+| shutdown service | 0.1 s | enabled, OK |
+| memory demand | 9.1 s | 450 MiB; the first report came about 54 s after power-on, because `hv_balloon` keeps quiet for its first 45 |
+| memory hot-add | 12.7 s | 2048 to 2456 MiB, between 6.4 and 9.5 s after the buffer went up |
+| host shutdown | 6.1 s | request delivered; off between 3 and 6 s later, since the poll is every 3 s |
+| cold boot #2 | 44.3 s | back on the same address |
+| KVP after reboot | 0.2 s | the same address |
+
+Three things the verdict column does not say:
+
+- **The hot-added memory came online.** Demand went from 450 to 491 MiB while
+  408 MiB were hot-added. `hv_balloon` reports hot-added pages that are still
+  offline as committed, so blocks left offline would have pushed demand up by
+  about 400 MiB. 41 MiB is roughly what its safety floor, a fraction of total
+  RAM, grows by when 400 MiB of new RAM do come online. That is the runtime
+  side of `MEMORY_HOTPLUG_DEFAULT_ONLINE` in the kernel contract.
+- **VSS reports OK without its daemon.** The kernel answers the VSS channel
+  itself; with `hv_vss_daemon` gone it refuses a freeze request, which matters
+  only to production checkpoints and host-level backups, and qubixctl creates
+  the VM with checkpoints disabled. The Guest Service Interface is disabled,
+  as Hyper-V ships it, and its daemon is gone as well.
+- **The pre-run stop was a clean shutdown, not a power cut.** Next to the
+  3-6 s of the checked shutdown, the file's `Stop-VM -Force took 0.7s` looked
+  like one. Hyper-V's own log says otherwise: event 18504 at 09:59:40, "shut
+  down using the shutdown integration component, Force = true", and nothing
+  at all in the 33 minutes the VM had idled before that - no guest crash, no
+  lost heartbeat. The guest handles forced and polite requests the same way
+  (`hv_utils` hands both to `orderly_poweroff()`, which runs the
+  `systemd poweroff` NixOS sets as `kernel.poweroff_cmd`), so the difference
+  is the guest's state, not the path. Most likely the checked shutdown lands
+  a minute after boot and straight after the memory test, with fresh writes
+  still to flush and the balloon starting to take back 400 MiB, while a VM
+  that has idled for half an hour has nothing left to do.
+
+These are the numbers later runs get compared against. A cold boot that
+drifts towards a minute, or a hot-add that no longer shows up within a few
+polls, is the thing to look into before anything else changes.
 
 ## Publishing A Release
 
@@ -285,20 +464,31 @@ already exists (Docker, a lab switch), reuse it or switch spotibox to DHCP.
 ## Validation
 
 ```bash
-nix flake check --no-build                                   # evaluates every system and the test
+nix flake check --no-build                                   # every system, both VM tests, the prod/debug split
 nix build .#checks.x86_64-linux.spotibox-basic               # boots the appliance in QEMU
+nix build .#checks.x86_64-linux.spotibox-xrdp-session        # starts a real xrdp session in it
+tools/closure.sh report                                      # what the production image is made of
+tools/closure.sh diff                                        # what the debug image adds on top of it
+tools/closure.sh why cups                                    # who is still holding on to a store path
+tools/closure.sh check                                       # the CI closure gate, locally
+tools/cold-boot.sh                                           # boots the real VHDX through OVMF, ESP and all
+tools/telemetry.sh                                           # image-level sizes against tests/image-budget.nix
 pwsh ./tests/qubixctl.Tests.ps1                              # controller unit checks
+pwsh ./tests/qubix-acceptance.Tests.ps1                      # acceptance harness, against stand-in Hyper-V cmdlets
 ```
 
 Manual acceptance on Windows:
 
 1. Double-click `tools\qubix-up.cmd`; Hyper-V shows `qubix-spotibox` running.
 2. The RDP window opens as `rdp` with Spotify maximised and undecorated.
-3. Audio plays through the host; `pavucontrol` (via an `xterm` from the Hyper-V
-   console, user `user`) shows the xrdp sink.
+3. Audio plays through the host. The production image has neither a mixer nor
+   a terminal any more: to look at the xrdp sink, build `spotibox-debug`, which
+   keeps `pavucontrol`, an `xterm` and ssh.
 4. Log into Spotify, run `qubixctl -Command recreate`, click again: still
    logged in.
 5. Quit Spotify: the RDP window closes.
+6. Run `tools\qubix-acceptance.cmd`. It is the only thing that tests Dynamic
+   Memory, host-requested shutdown and KVP - see *Release Readiness*.
 
 ## Design Notes
 
@@ -410,6 +600,596 @@ keep running the untouched build - the option silently does nothing. A fix is op
 upstream as [nixpkgs#452303](https://github.com/NixOS/nixpkgs/pull/452303); when it
 lands, this overlay can become a plain `services.xrdp.package` assignment.
 
+### Closure Budget
+
+The VHDX is not a filesystem somebody installed packages into. It is the
+closure of `system.build.toplevel` with a partition table around it: a package
+ships because something in the system still refers to it. That is why
+`nix-store --gc` inside the guest cannot make the image smaller, and why every
+size decision here is a decision about *roots* - drop the reference and Nix
+stops copying the path by itself.
+
+`profiles/modes/prod.nix` is where the production image stops being a general
+purpose NixOS box. Measured with `tools/closure.sh` against nixpkgs 25.11:
+
+| Taken out of the production image | Closure |
+| --- | --- |
+| baseline, before any of this | 3.82 GiB |
+| Perl, and the xdg-utils that was holding it | -57 MiB |
+| the default font set, minus the two fonts this renders with | -36 MiB |
+| desktop-session leftovers: XDG mime/icons/menus, nixos-icons, Avahi | -36 MiB |
+| Mesa and the LLVM behind llvmpipe | -768 MiB |
+| speech-dispatcher, espeak-ng, flite and 648 MiB of MBROLA voices | -699 MiB |
+| ffmpeg's SDL output device, and everything behind it (see below) | -331 MiB |
+| the nixpkgs sources pinned into `/etc/nix/registry.json` and `NIX_PATH` | -186 MiB |
+| xterm, pavucontrol, alsa-utils, man-db, docs, installer tools, `environment.defaultPackages` | -160 MiB |
+| the display-manager layer: LightDM, the NixOS xsession script, feh, Ghostscript | -84 MiB |
+| an OpenSSH client, BIND's `host`, and the rest of `corePackages` | -38 MiB |
+| the rest of NixOS's X server module (see below) | -10 MiB |
+| the Python interpreter and `-dev` outputs inside openbox (see below) | -52 MiB |
+| Nix, and the Python boot-loader installer that was holding it (see below) | -52 MiB |
+| `growpart`, on a disk the controller never resizes | -1 MiB |
+| `lsvmbus`, and with it the last Python interpreter (see below) | -108 MiB |
+| a kernel built for one machine instead of for all of them (see below) | -118 MiB |
+| the subsystems that machine cannot have: sound, radios, GPUs, KVM | -7 MiB |
+| **production total** | **1.15 GiB (-70.0%)**, 1024 store paths down to 584 |
+
+Three of those were never asked for by anything in the appliance:
+
+- `services/misc/graphical-desktop.nix` switches `services.speechd` on for any
+  system with a graphical session - "default guessed conservatively", says the
+  module - and speech-dispatcher pulls in a diphone voice corpus. Spotify does
+  not talk to the user.
+- Building a NixOS system from a flake pins the nixpkgs sources into the
+  system-wide flake registry and `NIX_PATH`, so that `nix run nixpkgs#hello`
+  works offline on the machine. The appliance runs no nix commands, and
+  upstream documents the closure cost of leaving it on.
+The font trim was checked the same way the rest of this branch was: by tracing
+what the application actually opens. On the trimmed image Spotify opens
+`DejaVuSans.ttf` and `NotoColorEmoji.ttf` - plus the rest of the DejaVu family
+- and asks for nothing it cannot find. Removing six font packages is the kind
+of change that fails visually rather than loudly, so "it still boots" would not
+have been an answer.
+
+- `hardware.graphics.enable` follows a graphical session around, and it
+  installs Mesa with the LLVM that llvmpipe needs. Hyper-V exposes no GPU, and
+  Spotify is a CEF application that carries its own renderer: traced through a
+  full startup in a VM with the option off, it loads
+  `share/spotify/libEGL.so`, `libGLESv2.so` and `libvulkan.so.1` - ANGLE over
+  SwiftShader - puts its window on screen, and never mentions
+  `/run/opengl-driver` once. Xorg keeps `libglvnd` and `mesa-libgbm`, which are
+  separate packages and two orders of magnitude smaller.
+
+A third one never reaches `toplevel` at all. `nixos/lib/make-disk-image.nix`
+copies a whole nixpkgs source tree into the image as the root user's `nixos`
+channel unless told otherwise, and the upstream Hyper-V module never tells it:
+`copyChannel` defaults to true. `profiles/image/hyperv.nix` calls
+make-disk-image itself with `copyChannel = false` for production images, taking
+another ~186 MiB of Nix expressions out of the VHDX - a second copy of the tree
+the registry was already pinning. `tools/closure.sh check` fails if it returns.
+
+### The X Server Nobody Configures
+
+The appliance runs X11, so `services.xserver.enable = true` looked like a load
+bearing line. It was not. xrdp starts one X server per session, and it starts
+it from its own `sesman.ini`, with a command line that nixpkgs bakes into the
+xrdp package at build time:
+
+    [Xorg]
+    param=/nix/store/...-xorg-server-21.1.22/bin/Xorg
+    param=-modulepath
+    param=/nix/store/...-xorgxrdp-0.10.4/lib/xorg/modules,...
+    param=-config
+    param=/nix/store/...-xorgxrdp-0.10.4/etc/X11/xrdp/xorg.conf
+
+NixOS's generated `/etc/X11/xorg.conf` is not in that list, and neither is
+`display-manager.service`. The upstream module says so in one comment - "xrdp
+can run X11 program even if `services.xserver.enable = false`" - and that is
+the whole of the documentation. So production turns the module off, and what
+leaves is the part of it that was only ever furniture for a desktop:
+
+- the input driver stack: `xf86-input-libinput`, `xf86-input-evdev`,
+  `libinput`, `libwacom` and the Python environment `libwacom` carries.
+  xorgxrdp's `xorg.conf` sets `AutoAddDevices off` and declares `xrdpkeyb` and
+  `xrdpmouse` as its only input devices, so none of it was ever loaded - there
+  is no keyboard and no tablet on the other end of an RDP connection, only a
+  protocol.
+- the core bitmap fonts `font-misc-misc`, `font-cursor-misc` and `font-alias`.
+  Nothing here sets a `FontPath`, so `xset q` on a live session reports the
+  font path as exactly `built-ins` - the font path element compiled into
+  libXfont2, which is where `fixed` and `cursor` come from. Those three
+  packages were indexed by fontconfig and then ignored by it.
+- `xrandr`, `xrdb` and its C preprocessor `mcpp`, `xset`, `xinput`, `xprop`,
+  `xlsclients`, `iceauth`, `x11-ssh-askpass`: X utilities, in an image whose
+  production session has no terminal to type them into.
+- `display-manager.service` itself. `services.displayManager.enable` had been
+  forced off for several commits already, but the unit is declared by the X
+  server module rather than by the display-manager one, so what shipped until
+  now was a greeter unit with an empty `ExecStart`.
+
+Three forced-off options went with it, because all three were downstream of
+this one: LightDM, `services.displayManager.enable`, and `gtk.iconCache.enable`
+- whose default is literally `config.services.xserver.enable`. One switch
+instead of four, and `tests/appliance-split.nix` asserts the outcomes so it
+stays that way.
+
+`services.xserver.displayManager.lightdm.enable` had to move rather than
+disappear: LightDM asserts that the X server is on, and
+`profiles/gui/openbox.nix` was asking for a greeter unconditionally. It now
+follows `services.xserver.enable`, which is what it meant all along.
+
+Ten MiB is not much next to Mesa, and this is the change that most deserved a
+test rather than a build. "It evaluates" proves nothing about an X server
+started by a daemon from a config file NixOS never reads.
+`tests/xrdp-session.nix` therefore asks xrdp for a real session with
+`xrdp-sesrun` - xrdp's own session starter, speaking the same SCP protocol to
+`sesman` that the RDP listener does - and then checks, on that session's
+display, that Xorg answers, that the font path is `built-ins`, that the
+`us,ru` layout and the Win+Space toggle from `profiles/remote/xrdp.nix` took,
+that Openbox owns the root window, and that the Spotify window is up and
+maximised. The X clients in it run as `rdp` with the session's own
+`Xauthority`, because `sesman` starts Xorg with `-auth` and root cannot open
+that display.
+
+### The Boot Loader Was Holding Nix
+
+`nix.enable = false` switched off the daemon and was worth 9 MiB, which never
+added up: the `nix` package itself stayed. The reason is one line in NixOS's
+systemd-boot installer, `systemd-boot-builder.py`:
+
+    nix-env -p /nix/var/nix/profiles/system --list-generations
+
+The installer is a Python script, it enumerates generations with `nix-env`, and
+`system.build.installBootLoader` is a runtime reference from
+`switch-to-configuration`. So an appliance that cannot rebuild itself shipped
+Nix, and behind Nix came boost, the AWS SDK (for S3 binary caches it will never
+read), libgit2, boehm-gc, onetbb, s2n-tls and seven `aws-c-*` libraries. 52 MiB
+and 43 store paths, for a generation list that is always exactly one entry
+long.
+
+`boot.loader.external` is upstream's seam for replacing the installer, and
+`profiles/modes/prod.nix` uses it: a shell script that runs `bootctl install`
+(from the systemd already in the closure) and writes one loader entry. It is
+the same systemd-boot on the ESP, including `EFI/BOOT/BOOTX64.EFI` - the
+removable path, which is what Hyper-V's firmware boots and what the upstream
+image module asks for with `boot.loader.grub.efiInstallAsRemovable`. What it
+does not do is everything an appliance cannot reach: no generation
+enumeration, no pruning of old entries, no memtest or EFI shell entries, no
+Secure Boot signing. Debug images keep the stock builder, because
+`nixos-rebuild switch` inside the guest is a real debugging workflow there.
+
+The obvious-looking alternative is worse. Turning `boot.loader.systemd-boot`
+off does not reveal a dead GRUB underneath: `systemd-boot.nix` sets
+`boot.loader.grub.enable = mkDefault false`, so systemd-boot is the live one
+and the GRUB block in `hyperv-image.nix` is the inert one. Switching to GRUB
+means `install-grub.pl`, which means Perl - and
+`system.forbiddenDependenciesRegexes` fails the build with the whole list of
+Perl packages, which is the guard doing its job.
+
+This is also the first change here that can produce an unbootable appliance,
+so it is the first one with a cold boot behind it. `tools/cold-boot.sh` builds
+the VHDX, attaches the home seed next to it and lets OVMF - the same firmware
+class as a Hyper-V generation 2 VM with Secure Boot off - find
+`EFI/BOOT/BOOTX64.EFI` on its own. Firmware loads the loader, the loader loads
+the entry, the EFI stub loads the initrd, the root and home filesystems mount,
+the static address comes up, and xrdp answers an X.224 connection request from
+outside the VM. The NixOS VM tests cannot cover any of that: they boot with
+`-kernel`/`-initrd` and never touch an ESP.
+
+### A Kernel For One Machine
+
+`boot.kernelPackages = pkgs.linuxPackages` is a sentence that means "I know
+this machine's hardware down to the model of its network adapter, so give me a
+kernel for every device ever built." nixpkgs builds its kernels with
+`autoModules = true`, which answers `m` to every question the kernel's config
+script asks. That is right for a distribution and wrong here: 126 MiB of
+modules - 9% of the image at the time - for a machine whose hardware is a
+VMBus, one synthetic disk controller, one synthetic NIC and a synthetic
+keyboard.
+
+`profiles/kernel/hyperv.nix` builds the same source with `autoModules = false`
+and `kernelPreferBuiltin = true`, so unanswered questions fall back to the
+architecture default instead of becoming modules, and what remains is compiled
+in rather than loaded:
+
+| | stock | stage one | stage two |
+| --- | --- | --- | --- |
+| modules tree | 126.2 MiB | 3.7 MiB | 1.7 MiB |
+| kernel | 19.8 MiB | 29.1 MiB | 23.8 MiB |
+| initrd | 24.4 MiB | 22.0 MiB | 22.0 MiB |
+| **total** | **170.4 MiB** | **54.8 MiB** | **47.5 MiB** |
+
+The kernel image grows in stage one because the drivers moved into it. That is
+the trade, and it is a good one at this ratio - it is also why stage two
+matters more than its 7 MiB suggests: every driver cut there comes straight
+out of the `bzImage`, which is loaded into RAM on every boot.
+
+Stage two removes families rather than drivers: sound, every radio, every
+physical GPU, capture hardware and infrared, FireWire, InfiniBand, the
+parallel port, the floppy controller, every physical NIC driver, KVM, four
+filesystems with no mount point here, and Android's binder.
+Each one is a line in `tests/kernel-contract.nix` with the argument for it, so
+the list stays something a person can read rather than a second copy of
+Kconfig. Sound is the one that looks wrong: this appliance plays music, but
+never through a sound card - mstsc negotiates audio over RDP, `xrdp-chansrv`
+hands it to PulseAudio over a unix socket, and `module-xrdp-sink` opens no
+device. Checked on a running kiosk with Spotify up: `/proc/asound` does not
+exist and not one `snd` module is loaded.
+
+**What the appliance is not allowed to lose** is stated explicitly, and the
+list is longer than "Hyper-V". `system.etc.overlay` made `overlayfs` and
+`erofs` part of the boot contract when this image went perlless - `/etc` is an
+overlay over an erofs metadata image, so without either of them the system has
+no `/etc` at all. The console is `DRM_HYPERV`, a DRM driver rather than an
+fbdev one, so the graphics subsystem cannot simply be deleted either. And the
+QEMU drivers are in the contract on purpose: a kernel that only boots on
+Hyper-V is a kernel nobody can check before shipping, so virtio, 9p and AHCI
+are named rather than left to survive by accident.
+
+`tests/kernel-contract.nix` reads the finished `.config` - cheap, because the
+config is produced by the kernel's configure phase and not by compiling it -
+and asserts every symbol above with the reason it is there. It earned its keep
+immediately: turning `autoModules` off had silently taken `NF_TABLES` with it,
+and NixOS's firewall is `iptables-nft`, so the rule that makes 3389 the only
+way in would have quietly had nothing to run on.
+
+Three more things went wrong in ways worth writing down, because they are the
+shape of this work rather than accidents:
+
+- `boot.initrd.includeDefaultModules` puts a fixed list into every initrd -
+  SATA controllers, NVMe, SD readers, and one entry per USB keyboard vendor
+  that ever needed a quirk. A name in that list which does not resolve is a
+  hard build failure, so the first thing a trimmed kernel produces is `FATAL:
+  Module hid_corsair not found`, forty minutes into a compile. It is off here,
+  and what the initrd needs is named.
+- `nixos/modules/profiles/qemu-guest.nix`, which every NixOS VM test imports,
+  names seven more modules the same way. That list is now in the contract test
+  in full, so the failure arrives in seconds instead of in the middle of a
+  kernel build.
+- `VIRTIO_SCSI` is not a Kconfig symbol; the driver is `SCSI_VIRTIO`. With
+  `ignoreConfigErrors` a wrong name is not an error - the option simply does
+  nothing. The contract test is what noticed, which is the entire argument for
+  asserting the output rather than trusting the input.
+
+That last one only got noticed because `SCSI_VIRTIO` happened to be in the
+contract. `ignoreConfigErrors` is needed - nixpkgs' common-config asks for
+things stage two removed - but it cannot tell common-config's requests from
+`profiles/kernel/hyperv.nix`'s own, so the contract now holds the file itself
+to two rules. Every symbol it names has to exist in this kernel and land as
+asked. And every symbol it switches on has to be either required - so the
+check survives the line being deleted - or listed as `extra` with the reason
+it is still asked for; seven are, from the dm-verity experiment's
+device-mapper to QEMU's IDE controller, and each is a candidate for the next
+kernel change. On its first run the rule found `THUNDERBOLT = no`, a line that
+has done nothing since the symbol was renamed `USB4`. USB4 is off anyway, by
+default rather than by request, and the one-word fix rebuilds the kernel, so
+it waits: the contract lists the line as knowingly inert, and checks `USB4`
+itself instead.
+
+### The Last Python Was A Diagnostic
+
+With the boot loader no longer holding it, exactly one thing kept CPython in
+the image: `lsvmbus`, a Python script that lists VMBus devices. It is 4 KiB of
+Python and it was carrying a 107 MiB interpreter into an appliance whose
+production mode has no terminal to run it from.
+
+It arrives through `virtualisation.hypervGuest`, which bundles two unrelated
+things:
+
+- **The hardware contract.** VMBus drivers in the initrd (`hv_vmbus`,
+  `hv_storvsc`, `hv_netvsc`, `hv_utils`, `hv_balloon`), `hyperv_keyboard`,
+  `elevator=noop`, and udev rules that online hot-added CPUs and memory -
+  which is how Dynamic Memory reaches the guest. None of this is negotiable.
+- **Microsoft's userspace Integration Services.** Three daemons and the
+  diagnostic.
+
+The module offers no way to take one without the other: it appends to
+`environment.systemPackages` and `systemd.packages` unconditionally, and
+neither list can be subtracted from. So production replaces it - copying the
+hardware half verbatim, down to the name of the udev rules file so rule
+ordering does not change, and pinning the copy in
+`tests/appliance-split.nix` so a nixpkgs bump cannot quietly change it.
+
+The daemons were decided one at a time, against `tools/qubixctl.ps1`:
+
+| Daemon | Verdict | Evidence |
+| --- | --- | --- |
+| `hv_kvp_daemon` | **kept** | `Get-QubixAddress` falls back to `(Get-VMNetworkAdapter).IPAddresses` for machines with no static IP - `spotibox-debug` is one - and `qubixctl -Command status` prints the same field. That channel *is* the KVP daemon. |
+| `hv_vss_daemon` | dropped | The controller runs `Set-VM -CheckpointType Disabled` on purpose, because checkpoints fork the home disk into `.avhdx` chains `recreate` cannot clean up. Nothing left to coordinate with. |
+| `hv_fcopy_uio_daemon` | dropped | Implements `Copy-VMFile`; the controller never calls it. |
+| `lsvmbus` | dropped | A diagnostic, in an image with no terminal - and the last reference to Python. |
+
+Host-requested shutdown, timesync and heartbeat are not affected by any of
+this: `hv_utils` implements them in the kernel and calls `orderly_poweroff()`
+directly, with no userspace helper in the path.
+
+Note what this is *not*. `virtualisation.hypervGuest.enable = false` on its own
+would take the initrd drivers and the hot-add rules with it, and the machine
+would either not boot or quietly ignore Dynamic Memory. The switch is the
+wrong instrument; the package is the right one.
+
+### The Partition Nobody Resizes
+
+`boot.growPartition` comes from the upstream Hyper-V image, and it exists for
+one scenario: the virtual disk was enlarged after the image was written, so
+the partition table still describes the old size. `growpart` stretches the
+partition, `systemd-growfs` stretches the filesystem onto it.
+
+There is no `Resize-VHD` anywhere in `tools/qubixctl.ps1`. It downloads a
+`.vhdx.gz` of a fixed size, gunzips it, attaches it and starts the VM;
+`recreate` replaces the image rather than growing it. So the service has run on
+every boot of every Spotibox, looked at a partition that already filled the
+disk, and gone home - for `gptfdisk` and `cloud-utils-guest`, about 1 MiB.
+`fileSystems."/".autoResize` stays on: same safety net one layer up, no extra
+cost, and it is what would notice if the partition ever did change underneath
+us.
+
+### The Window Manager With A Python Interpreter In It
+
+Openbox is the package in this image least likely to be suspected of anything:
+1.5 MiB, a window manager, no dependencies worth arguing about. Its closure was
+302 MiB, and `tools/closure.sh why python3` pointed straight at it. Two
+independent reasons, both in `pkgs/by-name/op/openbox/package.nix`:
+
+- `pythonPath = [ pyxdg ]` together with `wrapPythonProgramsIn "$out/libexec"`
+  puts a wrapped CPython on `libexec/openbox-xdg-autostart`, whose job is to
+  launch XDG autostart entries. Exactly one thing calls it -
+  `libexec/openbox-autostart`, which is itself only called from
+  `openbox-session`. The kiosk session runs `openbox` directly, and production
+  forces `xdg.autostart.enable` off, so nothing in this image can reach it.
+- `propagatedBuildInputs = [ pango imlib2 ]` writes those packages' **dev**
+  outputs into `nix-support/propagated-build-inputs`, and Nix scans that file
+  for store references like any other. So a window manager's runtime closure
+  contained `pango-dev`, `imlib2-dev` and, behind them, `glib-dev`, gettext,
+  the Linux kernel headers, `glibc-dev` and a dozen more `-dev` outputs: about
+  50 MiB of build-time metadata in an appliance that compiles nothing.
+
+An overlay in `profiles/gui/openbox.nix` removes the Python helper, comments
+out its one call site with `--replace-fail` so that an upstream change breaks
+the build instead of silently doing nothing, and drops `nix-support`. Openbox's
+closure goes from 302 MiB to 96 MiB and the image loses 52 MiB and 28 store
+paths. Debug images keep the stock package.
+
+The interpreter itself does not leave: `python3` is also held by systemd-boot's
+installer script, by `lsvmbus` from `hyperv-daemons`, and by `growpart` from
+`cloud-utils`. Three more references, three more things to look at - which is
+the general lesson here. The packages worth auditing are not the ones that look
+big; they are the ones nobody thinks to check.
+
+### The Disk Was Sized For A Fear, Not A Measurement
+
+`virtualisation.diskSize` said 30 GiB, with the comment `Need 30 GB o_O`. With
+the closure at 1.5 GiB, the candidates measure like this - ext4 metadata from
+`mkfs.ext4` on an image of each size, free space after installing the system,
+and the journal cap systemd derives from the filesystem (10%, capped at 4 GiB):
+
+| Disk | ext4 metadata | Free after the system | Journal cap |
+| --- | --- | --- | --- |
+| 4 GiB | 145 MiB | 2431 MiB | 410 MiB |
+| 6 GiB | 186 MiB | 4438 MiB | 614 MiB |
+| **8 GiB** | **231 MiB** | **6441 MiB** | **819 MiB** |
+| 30 GiB | 656 MiB | 28544 MiB | 3072 MiB |
+
+A dynamic VHDX does not allocate the virtual size up front - a freshly
+formatted image is 68 MiB at 4 GiB and 135 MiB at 30 - but ext4 writes its
+inode tables lazily after the first mount, so the 30 GiB filesystem does
+eventually claim its 656 MiB. The other half of the argument is the journal:
+at 30 GiB systemd is willing to keep 3 GiB of logs on a machine whose entire
+system is 1.5 GiB. 8 GiB is four times the image with the log cap at a sane
+819 MiB, so that is what it is now.
+
+Debug images keep every bit of it, plus ssh, strace, an xterm and a mixer. The
+switch is `qubix.mode`, and `machines/spotibox-debug.nix` is still three lines.
+
+The Spotify line in that table is worth spelling out, because the obvious
+reading of it is wrong. The nixpkgs package exports an `LD_LIBRARY_PATH`
+naming every library Spotify might ever `dlopen`, and Nix reads each of those
+store paths as a reference - but `readelf -d` says most of them are `DT_NEEDED`
+of `libcef.so` or of the Spotify binary itself, CUPS and libayatana-appindicator
+and libdbusmenu among them. Dropping those does not shrink the image, it stops
+the process at exec time. The two that actually paid were subtler:
+
+- Spotify links `libavcodec` and `libavformat` out of `ffmpeg_4`, and referring
+  to that lib output keeps all of it - including `libavdevice`, whose SDL
+  output device pulls SDL3, which pulls zenity, GTK4, gst-plugins-bad,
+  PipeWire, BlueZ, `spandsp` (a fax-modem DSP library) and `libajantv2`
+  (support for AJA broadcast capture cards). `ffmpeg_4-headless` is the same
+  4.4.6 with the same decoders - aac, mp3, opus, vorbis, flac, pcm - and none
+  of the tail.
+- `zenity` is on `PATH` for the folder picker behind "add local files". A kiosk
+  has no local files; traced through a startup, Spotify never runs it.
+
+Perl deserves a note, because the obvious explanation was wrong twice. It is
+not in the image because the activation scripts are written in it - or rather,
+it was not *only* that. `services.graphical-desktop.enable`, which follows
+`services.xserver.enable` around, installs `xdg-utils`, and xdg-utils is a pile
+of Perl scripts with `libwww-perl` and `XML-Twig` behind them. Only once that
+was gone did the activation scripts become the last holder, and then nixpkgs'
+own `profiles/perlless.nix` had the answer: an overlayfs `/etc` instead of
+`setup-etc.pl`, `userborn` instead of `update-users-groups.pl`, and
+`system.forbiddenDependenciesRegexes = [ "perl" ]` to keep it out. The
+production profile now carries that regex list for every ghost this branch has
+exorcised, because a closure budget only says "bigger" - a package can come
+back transitively while something else shrinks and the total stays inside.
+
+What is left is mostly honest: Spotify itself (345 MiB), the kernel and its
+modules (126 MiB), a python3 (107 MiB) that four separate things need
+(`hyperv-daemons`, `cloud-utils` for `growPartition`, the systemd-boot
+generation builder and glib's `gdbus-codegen`), systemd, and the
+GTK3/Xorg/xrdp/PulseAudio path the appliance exists to run.
+
+`environment.corePackages` is now an allowlist rather than NixOS's set of
+"core packages for a normal interactive system". Two upstream modules add to
+that set unconditionally and offer no way to refuse -
+`nixos/modules/programs/ssh.nix` contributes an OpenSSH client to a machine
+whose sshd is forced off, and `nixos/modules/tasks/network-interfaces.nix`
+contributes BIND's `host` to one with static resolvers - so the list is
+replaced with what something on this image can still reach through
+`/run/current-system/sw/bin`. Not busybox: the scripts that survive expect GNU
+semantics, and swapping the implementation to save a few megabytes is how you
+get a bug report six months later about a flag that quietly means something
+else.
+
+That also answered the `nix.enable` question from earlier in this file. It is
+worth 9 MiB, not the 49 the nix closure suggests, because the systemd-boot
+generation builder interpolates `${config.nix.package}/bin/nix-env` and keeps
+the package alive regardless. What actually leaves is the daemon, its socket,
+and the OpenSSH client that was on nix-daemon's `PATH` for remote builds. The
+one step this branch cannot verify is `switch-to-configuration boot` inside
+make-disk-image, which needs KVM; if it minds, it will say so at image build
+rather than at the user's.
+
+`tools/closure.sh roots` ranks the system packages by *added size* - what
+actually leaves the closure if that one package is dropped, which is the only
+number worth acting on, since a 300 MiB package is free when everything it
+needs is already there. It found the next two candidates immediately: the
+appliance carries an OpenSSH client (9 MiB) with sshd disabled, and BIND's
+`host` (8 MiB) with static resolvers, both because
+`nixos/modules/programs/ssh.nix` and `nixos/modules/tasks/network-interfaces.nix`
+add them to `environment.corePackages` unconditionally. There is no option to
+switch either off; `environment.corePackages` would have to be replaced with an
+allowlist, and that is a separate experiment - system scripts expect GNU
+semantics, and "it still boots" is not the same as "nothing broke".
+
+### Why The Image Is ext4, And What Compression Would Buy
+
+The store compresses about two and a half to one, measured rather than
+guessed, on the 1.65 GiB production closure:
+
+| | Size | Ratio |
+| --- | --- | --- |
+| the closure itself | 1686 MiB | - |
+| squashfs, zstd-6 (128 KiB blocks) | 651 MiB | 2.59x |
+| `tar \| zstd -3`, roughly what btrfs `compress=zstd` achieves | 663 MiB | 2.54x |
+| erofs, zstd-6 (systemd-repart's defaults, 4 KiB clusters) | ~812 MiB | 2.08x |
+| `tar \| gzip -9`, roughly today's release asset | 715 MiB | - |
+
+None of it is reachable from where this repo stands, and not for want of
+trying: `nixos/lib/make-disk-image.nix`, which the `nixos-generators` Hyper-V
+format calls, asserts
+
+```text
+to produce a partition table, we need to use -E offset flag which is support
+only for fsType = ext4
+```
+
+so an image with a partition table - which a Generation 2 VM needs, because it
+needs an ESP - is ext4 or nothing. That is a property of the builder, not a
+decision anybody made here.
+
+The door out is `image.repart`, NixOS's systemd-repart image module. It takes
+any filesystem systemd-repart can format (btrfs, erofs, squashfs, xfs), and
+`image.repart.verityStore` ships the appliance shape directly: a tmpfs root, a
+compressed erofs `/nix/store` under dm-verity, and a UKI on the ESP. Built
+against this configuration as an experiment it produces the image in tens of
+seconds, in a plain Nix build with no QEMU and no KVM - which is also how the
+release job could stop needing the `/dev/kvm` dance it currently performs.
+
+That image was booted under OVMF to see whether the shape actually works, and
+it does: firmware to UKI, dm-verity set up from the `usrhash=` on the kernel
+command line, `/nix/store` mounted read-only off `/dev/mapper/usr`, root on
+tmpfs, `multi-user.target` reached with **zero failed units** and xrdp and
+xrdp-sesman both active and listening on 3389.
+
+It also found the trap, which is why the filesystem matters more than the
+algorithm. systemd-repart will cheerfully build an erofs with
+`Compression=zstd`, and the stock NixOS kernel cannot mount it:
+
+```text
+erofs: (device dm-0): z_erofs_parse_cfgs: algorithm 3 isn't enabled on this kernel
+[FAILED] Failed to mount /sysusr/usr.
+```
+
+`CONFIG_EROFS_FS_ZIP=y` but `CONFIG_EROFS_FS_ZIP_ZSTD is not set`, so the image
+builds, passes its verity check, and then drops straight into emergency mode on
+a machine nobody can log into. LZ4 is the only algorithm the stock kernel's
+erofs has. Squashfs, on the other hand, is built `CONFIG_SQUASHFS_ZSTD=y` - and
+its 128 KiB blocks compress better than erofs's 4 KiB clusters anyway:
+
+| store filesystem | Image | Boots on the stock kernel |
+| --- | --- | --- |
+| erofs, no compression | 1868 MiB | yes |
+| erofs, `Compression=zstd` | 968 MiB | **no** |
+| erofs, `Compression=lz4hc` | 1144 MiB | yes |
+| **squashfs, `Compression=zstd`** | **839 MiB** | **yes** |
+
+The squashfs image breaks down as 691 MiB of store, 46 MiB of verity hashes and
+the ESP. Enabling `EROFS_FS_ZIP_ZSTD` in a custom kernel would buy back erofs's
+faster random reads, but not size - and it would cost a from-source kernel
+build in every release, since that config is not what cache.nixos.org has.
+
+The ESP has a floor that is not where `SizeMinBytes` says it is.
+systemd-repart will not make a vfat partition smaller than 100 MiB: asking for
+8M, 64M or 96M all produce exactly 100 MiB, while 300M produces 300 MiB. FAT32
+wants 65525 clusters and repart refuses to go below a safe minimum. The way
+around it is to stop asking repart to format the ESP at all - build the FAT
+image in its own derivation, put the UKI in it with `mtools`, and hand repart
+the result with `CopyBlocks=`:
+
+| | Image |
+| --- | --- |
+| 100 MiB ESP (repart's vfat floor) | 839 MiB |
+| 64 MiB ESP via `CopyBlocks=` | 803 MiB |
+| **40 MiB ESP, after trimming the initrd** | **775 MiB** |
+
+That variant also builds without a privileged mount, because `CopyBlocks=`
+skips both `mkfs.vfat` and the loopback mount that populating a vfat partition
+otherwise needs.
+
+Below the ESP sits the UKI, and inside it the initrd, which starts at 22 MiB
+compressed out of a 34 MiB UKI. Two settings take it to 19 MiB without
+rebuilding anything: `boot.initrd.compressorArgs = [ "-19" "-T0" ]`, because
+NixOS does not compress the initrd as hard as zstd can, and
+`boot.initrd.includeDefaultModules = false` with the three storage modules this
+machine actually has. The UKI drops to 31 MiB, the ESP can then be 40 MiB, and
+the store shrinks a little too since the initrd lives in it. Total: 803 MiB
+to 775 MiB.
+
+The remaining 19 MiB is mostly not the initrd's own doing. Unpacked it is
+39 MiB, of which systemd is 15 MiB and its dependency tail - OpenSSL 8.5 MiB,
+tpm2-tss 3.2 MiB, Kerberos 1.7 MiB, curl, GMP, PCRE2 - is another 15 MiB;
+kernel modules are 1.9 MiB. Dropping that tail would take the initrd to 13 MiB
+compressed, but it is what `boot.initrd.systemd.package` is, and that defaults
+to the full `config.systemd.package`. Two things block the obvious fixes:
+
+- `pkgs.systemdMinimal` is built `withCryptsetup = false`, so it has no
+  `systemd-veritysetup` and cannot set up the store this image boots from.
+- lvm2 is not optional either. `nixos/modules/system/boot/systemd/dm-verity.nix`
+  sets `boot.initrd.services.lvm.enable = true` on purpose: device-mapper's
+  udev rules live in lvm2, and without them `/dev/mapper/usr` never appears.
+
+So a smaller initrd means a systemd built from source with a custom feature
+set, in every release, to save about 9 MiB in an 800 MiB image. The store is
+688 of those 775 MiB; that is where the next gigabyte is, if there is one.
+
+Two things are worth knowing before anyone reaches for it:
+
+- **Compression does not make the download much smaller.** The release asset is
+  a gzip of the image, and gzip of an already-compressed filesystem gains
+  nothing: 715 MiB today against 775 MiB for the squashfs image. What does
+  shrink is the space the VM occupies on the Windows host, because a dynamic
+  VHDX only allocates the blocks the filesystem actually wrote: roughly 1.8 GB
+  now against 775 MiB. The download is a wash; the footprint drops by 2.4x.
+- Hardlink deduplication - what `nix-store --optimise` does - is not the
+  missing gigabyte. Hashing every file in the closure finds 4192 duplicates
+  worth 29 MiB, or 1.8%. Nix already deduplicates at the granularity that
+  matters.
+
+ZFS was considered and measured rather than argued about. Neither
+make-disk-image nor systemd-repart can format it, so it would need a third
+image pipeline; `pkgs.zfs`'s closure is 351 MiB, a fifth of the entire
+appliance, before the out-of-tree module built per kernel; and the ARC would
+claim half the VM's RAM by default. What it offers - transparent compression,
+checksums, snapshots - is compression this already gets for free, integrity
+that dm-verity does better for a read-only store, and snapshots of a system
+disk the design already treats as disposable. The one place it could earn its
+keep is the persistent `/home` disk, which mostly holds an already-compressed
+Spotify cache.
+
+Secure Boot is already off on the VM (`Set-VMFirmware -EnableSecureBoot Off`),
+so an unsigned UKI would boot; the work is the rest of the pipeline - image
+file name, manifest, `qubixctl`, the home disk and the release job.
+
 ### Nix-Generated JSON
 
 Nix is the source of truth for the manifest. `manifest.json` is the output of
@@ -430,8 +1210,10 @@ profiles/
   apps/spotify.nix         Spotify package, kiosk rc.xml, spotibox-session
   audio/pulseaudio-xrdp.nix
   gui/openbox.nix
+  image/hyperv.nix         Hyper-V image without the nixpkgs channel copy
   kernel/default.nix
-  modes/debug.nix, prod.nix
+  kernel/hyperv.nix        the appliance kernel: Hyper-V, and what booting and testing it need
+  modes/debug.nix, prod.nix  what a debug image adds, what a production one drops
   network/default.nix
   remote/xrdp.nix          xrdp server, session = qubix.session.command
   security/minimal.nix
@@ -441,20 +1223,77 @@ tools/
   qubixctl.cmd             console wrapper
   qubix-up.cmd             double-click launcher (elevates, runs `up`)
   update-manifest.sh
+  closure.sh               closure census and budget (report/diff/why/check/baseline)
+  cold-boot.sh             boots a built VHDX through OVMF firmware, checks RDP
+  telemetry.sh             image-level size telemetry and budget, run at release
+  qubix-acceptance.ps1     Hyper-V acceptance: Dynamic Memory, shutdown, KVP
+  qubix-acceptance.cmd     elevating wrapper for it
 tests/
-  spotibox-basic.nix       NixOS VM test
+  spotibox-basic.nix       NixOS VM test: what the image contains
+  xrdp-session.nix         NixOS VM test: a real xrdp session, X, keyboard, kiosk
+  appliance-split.nix      evaluation-only guard for the prod/debug split
+  closure-budget.nix       recorded production closure budget, enforced by CI
+  image-budget.nix         recorded image and release sizes, enforced at release
+  kernel-contract.nix      what the appliance kernel must and must not contain
   qubixctl.Tests.ps1       controller unit checks
+  qubix-acceptance.Tests.ps1  acceptance harness checks, against stand-in Hyper-V cmdlets
+evidence/
+  hyperv-acceptance-2026-09-28.txt  the first green run on real Hyper-V, verbatim
 .github/workflows/
   ci.yml, release.yml
 ```
 
 ## TODO / Later Goals
 
+Closure work below this line is *post-baseline*: it belongs in its own branch
+and its own pull request, measured and accepted on its own, and it does not
+touch the production image until it has been. The image as it stands has an
+evidence trail - see *Release Readiness* - and the next 20 MiB is not worth
+spending that. If it turns out that saving 23 MiB of language tables costs a
+three-storey GTK override to carry forever, the right answer is no, and having
+the experiment in a separate branch is what makes saying no cheap.
+
+- `alsa-plugins` pulls a full ffmpeg 8 (32 MiB) into an appliance that already
+  carries ffmpeg 4 for Spotify, and the production audio path never touches
+  the ALSA device layer at all - traced on a running kiosk, no `snd` module is
+  loaded and `/proc/asound` does not exist. The causal chain is short enough
+  to look like a clean override. Acceptance has to include Spotify playing
+  through RDP audio *after a reconnect*, because dependencies like this have a
+  habit of being unnecessary right up to the first fallback codec.
+- GTK3 pulls `iso-codes` (23 MiB) for a language list the kiosk never shows.
+  Harder: GTK may reach that data through localised country and language names
+  rather than through a visible picker, so the likely outcome is a patch to
+  carry rather than an option to set. Second, and only if the first one went
+  well.
+- The next kernel change, whenever it comes, is also the time to spend the
+  rebuild on `THUNDERBOLT = no` becoming `USB4 = no` and on the seven `extra`
+  requests in `tests/kernel-contract.nix`, device-mapper included unless the
+  dm-verity image has landed by then. Each of those changes the kernel the
+  Hyper-V baseline was accepted with, which is why none of them is in it.
+
+- Move the image to `image.repart` with a dm-verity-protected squashfs store
+  (see *Why The Image Is ext4*). It halves what the VM occupies on the host,
+  makes the system disk verifiable rather than merely disposable, and drops the
+  KVM requirement from the release job - at the cost of a slightly larger
+  download and a new boot path (UKI + systemd initrd). The shape is proven: it
+  boots, mounts the store off `/dev/mapper/usr`, and brings xrdp up with no
+  failed units. What is not done is the pipeline around it.
 - Spotify network lockdown via nftables, proxy or DNS allowlist.
 - PipeWire + EasyEffects experiment once xrdp audio is understood.
 - Hardening profile, possibly inspired by nix-mineral, applied carefully.
-- Production image with fewer debug tools (drop `xterm` from prod).
-- Kernel profile experiments: default/latest/hardened first, custom tiny kernel later.
+- Sign the closure work off against real hardware: the Mesa/LLVM and Spotify
+  cuts were traced and booted in a QEMU VM (window on screen, no system GL
+  opened, every decoder still present), but nothing here has logged into
+  Spotify or played a track over mstsc yet. Do one cold run of each image
+  before tagging a release.
+- A Hyper-V-specific kernel. 126 MiB of the image - 9% of what is left - is
+  kernel modules, for a machine with exactly one virtualised bus. The staged
+  route is `buildLinux` with `autoModules = false` and `kernelPreferBuiltin`
+  first, then removing whole impossible subsystems (WLAN, Bluetooth, DRM,
+  media, sound hardware, SATA/NVMe, USB device classes), with `overlayfs` and
+  `vfat` treated as part of the boot contract rather than as optional
+  filesystems - `system.etc.overlay` and the ESP need them. Acceptance is
+  `tools/cold-boot.sh` plus both VM tests, not "it booted".
 - Hyper-V differencing disks for disposable runtime clones.
 - Private-repository release downloads (token-authenticated asset URLs).
 - Second backend behind the same manifest (App Sandbox / HCS) once it accepts

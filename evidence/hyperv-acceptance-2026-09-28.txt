@@ -1,0 +1,42 @@
+Qubix Hyper-V acceptance
+
+run started        : 2026-09-28T09:59:39.9775393+05:00
+image revision     : wsl:43b639e
+harness            : qubix-acceptance.ps1 unknown
+Hyper-V host       : S606 (Microsoft Windows NT 10.0.26200.0)
+VM                 : qubix-spotibox
+VM generation      : 2
+VM config version  : 12.0
+expected address   : 192.168.250.10
+deadline per check : 300 s
+pre-run stop       : the VM was Running; Stop-VM -Force took 0.7s
+
+integration services, as the host reports them:
+  6C09BB55-D683-4DA0-8931-C9BF705F6480  disabled  Ok                    Интерфейс гостевой службы
+  84EAAE65-2F2E-45F5-9BB5-0E857DC8EB47  enabled   Ok                    Пульс
+  2A34B1C2-FD73-4043-8A5B-DD2159BC743F  enabled   Ok                    Обмен парами "ключ-значение"
+  9F8233AC-BE49-4C79-8EE3-E7E1985B2077  enabled   Ok                    Завершение работы
+  2497F4DE-E9FA-4204-80E4-4B75C46419C0  enabled   Ok                    Синхронизация времени
+  5CED1297-4598-4915-A5FC-AD21BB4D02A4  enabled   Ok                    VSS
+
+memory hot-add, buffer 20% -> 469% aiming at 2560 MiB, host had 11664 MiB free:
+     0.1s  assigned   2048 MiB  demand    450 MiB  host free  11643 MiB
+     3.3s  assigned   2048 MiB  demand    450 MiB  host free  11683 MiB
+     6.4s  assigned   2048 MiB  demand    450 MiB  host free  11370 MiB
+     9.5s  assigned   2456 MiB  demand    491 MiB  host free  11295 MiB
+    12.6s  assigned   2456 MiB  demand    491 MiB  host free  11239 MiB
+
+run finished       : 2026-09-28T10:01:38.7828400+05:00
+final verdict      : PASS
+
+
+Check             Result Took  Detail
+-----             ------ ----  ------
+cold boot #1      PASS   44.9s xrdp answered an X.224 connection request on 192.168.250.10
+KVP expected IPv4 PASS   0.2s  host sees 192.168.250.10
+shutdown service  PASS   0.1s  enabled, OK
+memory demand     PASS   9.1s  guest reports 450 MiB
+memory hot-add    PASS   12.7s 2048 MiB startup, 2456 MiB at peak (buffer 469% on 450 MiB demand)
+host shutdown     PASS   6.1s  request 0 (delivered), and the guest powered itself off
+cold boot #2      PASS   44.3s came back on 192.168.250.10 after the clean shutdown
+KVP after reboot  PASS   0.2s  still 192.168.250.10

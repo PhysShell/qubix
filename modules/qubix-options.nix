@@ -27,9 +27,14 @@
     };
 
     kernel = lib.mkOption {
-      type = lib.types.enum [ "default" ];
+      type = lib.types.enum [ "default" "hyperv" ];
       default = "default";
-      description = "Selects the kernel profile. More kernel variants are later goals.";
+      description = ''
+        Selects the kernel profile.  `default` is nixpkgs' LTS kernel, built
+        the way a distribution builds one: every driver that can be a module
+        is a module.  `hyperv` is the same source configured for this
+        appliance's actual hardware - see profiles/kernel/hyperv.nix.
+      '';
     };
 
     labPassword = lib.mkOption {

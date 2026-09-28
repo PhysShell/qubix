@@ -11,7 +11,7 @@
       "homePackage": "spotibox-home-vhdx",
       "hostName": "spotibox",
       "maxMemoryBytes": 6442450944,
-      "memoryStartupBytes": 4294967296,
+      "memoryStartupBytes": 2147483648,
       "natSwitchSubnet": "192.168.250.0/24",
       "package": "spotibox-vhdx",
       "rdp": {
