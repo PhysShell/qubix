@@ -234,6 +234,13 @@ try {
     Assert-True ($null -eq (Get-HotAddPlan -DemandBytes 800MB -StartupBytes 2GB -MaximumBytes 2GB)) 'no plan when there is no room above startup'
     Assert-True ($null -eq (Get-HotAddPlan -DemandBytes 0 -StartupBytes 2GB -MaximumBytes 6GB)) 'no plan without a demand to size it from'
 
+    # --- Get-HarnessRevision ------------------------------------------------
+    # sha256('abc') is ba7816bf8f01cfea414140de5dae2223b00361a3...
+    Assert-True ((Get-HarnessRevision -Command ([PSCustomObject]@{ ScriptContents = 'abc' })) -eq 'sha256:ba7816bf8f01cfea') 'the harness digest is the first 16 hex digits of sha256'
+    Assert-True ((Get-HarnessRevision -Command ([PSCustomObject]@{ ScriptContents = '' })) -eq 'unknown (PowerShell exposed no script text)') 'no text is said out loud'
+    $why = Get-HarnessRevision -Command ([PSCustomObject]@{ Name = 'no ScriptContents here' })
+    Assert-True ($why -like 'unknown (?*)') "a failure carries its reason (got '$why')"
+
     # --- The shutdown service, by numbers ------------------------------------
     $state = Get-ShutdownServiceState -Component ([PSCustomObject]@{ EnabledState = [uint16]2; OperationalStatus = [uint16[]]@(2, 32896) })
     Assert-True ($state.Ok -and $state.Enabled) 'enabled and OK is OK'
@@ -266,7 +273,8 @@ try {
     }
     Assert-True ($run.Results.Count -eq $checks.Count) "a clean run records exactly the eight checks (got $($run.Results.Count))"
     Assert-True ($run.Evidence -match 'final verdict\s+: PASS') 'the evidence carries the verdict'
-    Assert-True ($run.Evidence -match 'harness\s+: qubix-acceptance\.ps1 sha256:[0-9a-f]{16}') 'the evidence says which harness produced it'
+    $fileDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $repo 'tools/qubix-acceptance.ps1')).Hash.Substring(0, 16).ToLowerInvariant()
+    Assert-True ($run.Evidence.Contains("harness            : qubix-acceptance.ps1 sha256:$fileDigest")) 'the evidence names the harness by the same digits sha256sum gives for the file'
     Assert-True ($run.Evidence -match '\d\.\ds' -and $run.Evidence -notmatch '\d,\ds') 'durations in the evidence use a dot under a comma culture'
     Assert-True ($run.Evidence.Contains('9F8233AC-BE49-4C79-8EE3-E7E1985B2077')) 'integration services are listed by GUID'
     Assert-True ($run.Evidence.Contains($shutdownRu)) 'and with the name the host gave them, whatever the language'

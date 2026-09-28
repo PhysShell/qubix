@@ -98,6 +98,11 @@ $ErrorActionPreference = 'Stop'
 $script:Results = @()
 $script:Notes = @()
 
+# This script, as PowerShell loaded it.  Taken here at script scope, where
+# $MyInvocation still describes the script rather than a function, so that
+# Get-HarnessRevision can hash the text without going back to the file.
+$script:HarnessCommand = $MyInvocation.MyCommand
+
 function Format-Duration {
     # '{0:N1}' -f follows the host's culture and writes 45,8 on a Russian one.
     # Evidence from different hosts has to compare as it is.
@@ -184,12 +189,25 @@ function Get-ImageRevision {
 function Get-HarnessRevision {
     # Which version of this script produced a given evidence file.  The image
     # revision says what was tested; this says what did the testing, and the
-    # two move independently.
+    # two move independently.  The digits are those of `sha256sum` on the
+    # file, but computed from the text PowerShell already holds: reading the
+    # file back with Get-FileHash failed on the first real run - Windows
+    # PowerShell 5.1, from a \\wsl.localhost path - and the reason was lost,
+    # so any failure here now says why.
+    param([object]$Command)
+
     try {
-        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $PSCommandPath).Hash
-        return 'sha256:' + $hash.Substring(0, 16).ToLowerInvariant()
+        $text = [string]$Command.ScriptContents
+        if ([string]::IsNullOrEmpty($text)) { return 'unknown (PowerShell exposed no script text)' }
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($text))
+        } finally {
+            $sha.Dispose()
+        }
+        return 'sha256:' + (-join ($digest[0..7] | ForEach-Object { $_.ToString('x2') }))
     } catch {
-        return 'unknown'
+        return "unknown ($($_.Exception.Message))"
     }
 }
 
@@ -615,7 +633,7 @@ function Invoke-QubixAcceptance {
     $startedAt = Get-Date
     Add-Note ("run started        : {0:o}" -f $startedAt)
     Add-Note ("image revision     : {0}" -f (Get-ImageRevision -VmDir $vmDir))
-    Add-Note ("harness            : qubix-acceptance.ps1 {0}" -f (Get-HarnessRevision))
+    Add-Note ("harness            : qubix-acceptance.ps1 {0}" -f (Get-HarnessRevision -Command $script:HarnessCommand))
     Add-Note ("Hyper-V host       : {0} ({1})" -f $env:COMPUTERNAME, [System.Environment]::OSVersion.VersionString)
     Add-Note ("VM                 : {0}" -f $vmName)
     Add-Note ("VM generation      : {0}" -f $vm.Generation)
