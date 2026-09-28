@@ -330,6 +330,45 @@ A hot-add that takes 55 seconds instead of 4 after some future Hyper-V or
 kernel update is exactly the kind of degradation that creeps in quietly, and
 there is no way to notice it without the earlier number to compare against.
 
+### Baseline: 2026-09-28
+
+The first run that went green on a real host is kept verbatim in
+`evidence/hyperv-acceptance-2026-09-28.txt`. It checked image 43b639e, and
+nothing since has changed the image derivations. The harness was a4085e5's,
+which hashes to `sha256:9b03f08f2f19d19c`; the file says `unknown` because
+reading its own script back failed on Windows PowerShell 5.1, which 2bcfa12
+fixed. The host was Windows 11 build 26200 with a Russian UI, the VM
+generation 2 at configuration version 12.0.
+
+| Check | Took | What it showed |
+| --- | --- | --- |
+| cold boot #1 | 44.9 s | power-on to an X.224 reply |
+| KVP expected IPv4 | 0.2 s | the static address, as soon as xrdp answered |
+| shutdown service | 0.1 s | enabled, OK |
+| memory demand | 9.1 s | 450 MiB; the first report came about 54 s after power-on, because `hv_balloon` keeps quiet for its first 45 |
+| memory hot-add | 12.7 s | 2048 to 2456 MiB, between 6.4 and 9.5 s after the buffer went up |
+| host shutdown | 6.1 s | request delivered; off between 3 and 6 s later, since the poll is every 3 s |
+| cold boot #2 | 44.3 s | back on the same address |
+| KVP after reboot | 0.2 s | the same address |
+
+Two things the verdict column does not say:
+
+- **The hot-added memory came online.** Demand went from 450 to 491 MiB while
+  408 MiB were hot-added. `hv_balloon` reports hot-added pages that are still
+  offline as committed, so blocks left offline would have pushed demand up by
+  about 400 MiB. 41 MiB is roughly what its safety floor, a fraction of total
+  RAM, grows by when 400 MiB of new RAM do come online. That is the runtime
+  side of `MEMORY_HOTPLUG_DEFAULT_ONLINE` in the kernel contract.
+- **VSS reports OK without its daemon.** The kernel answers the VSS channel
+  itself; with `hv_vss_daemon` gone it refuses a freeze request, which matters
+  only to production checkpoints and host-level backups, and qubixctl creates
+  the VM with checkpoints disabled. The Guest Service Interface is disabled,
+  as Hyper-V ships it, and its daemon is gone as well.
+
+These are the numbers later runs get compared against. A cold boot that
+drifts towards a minute, or a hot-add that no longer shows up within a few
+polls, is the thing to look into before anything else changes.
+
 ## Publishing A Release
 
 ```bash
@@ -1146,6 +1185,7 @@ profiles/
   gui/openbox.nix
   image/hyperv.nix         Hyper-V image without the nixpkgs channel copy
   kernel/default.nix
+  kernel/hyperv.nix        the appliance kernel: Hyper-V, and what booting and testing it need
   modes/debug.nix, prod.nix  what a debug image adds, what a production one drops
   network/default.nix
   remote/xrdp.nix          xrdp server, session = qubix.session.command
@@ -1170,6 +1210,8 @@ tests/
   kernel-contract.nix      what the appliance kernel must and must not contain
   qubixctl.Tests.ps1       controller unit checks
   qubix-acceptance.Tests.ps1  acceptance harness checks, against stand-in Hyper-V cmdlets
+evidence/
+  hyperv-acceptance-2026-09-28.txt  the first green run on real Hyper-V, verbatim
 .github/workflows/
   ci.yml, release.yml
 ```
