@@ -3,8 +3,11 @@
 #
 # tests/closure-budget.nix gates the closure, which every pull request
 # can afford to measure.  This gates what only a finished image knows:
-# what the VHDX occupies on the host and what the release asset costs
-# to download.  Re-record deliberately, and say why in the commit.
+# what the VHDX costs the host - its apparent size, since qubixctl
+# writes it out in full - and what the release asset costs to download.
+# vhdxBuilderAllocatedBytes is the builder's sparse view of the same
+# file, not a host cost.  Re-record deliberately, from a commit, and say
+# why in the commit that follows.
 {
   spotibox = {
     # What the numbers below were measured against.
@@ -17,7 +20,7 @@
     modulesBytes = { measured = 1791736; max = 1881322; };
     initrdBytes = { measured = 23096904; max = 24251749; };
     vhdxApparentBytes = { measured = 1736441856; max = 1823263948; };
-    vhdxAllocatedBytes = { measured = 1410531328; max = 1481057894; };
+    vhdxBuilderAllocatedBytes = { measured = 1410531328; max = 1481057894; };
     releaseBytes = { measured = 520362719; max = 546380854; };
     homeReleaseBytes = { measured = 420861; max = 441904; };
   };
