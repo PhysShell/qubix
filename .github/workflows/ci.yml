@@ -32,6 +32,9 @@ jobs:
   closure:
     name: production closure budget
     runs-on: ubuntu-latest
+    env:
+      # For the push step's condition: `if:` cannot read secrets directly.
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -44,11 +47,33 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@main
 
+      # Pull only.  The cache is public, and the action's own push sends
+      # whole closures - the toplevel's has Spotify in it, which nixpkgs marks
+      # unfree and not redistributable.  What is worth caching is pushed by
+      # name after the build.
+      - uses: cachix/cachix-action@v17
+        with:
+          name: physshell
+          skipPush: true
+
       # Builds system.build.toplevel - the closure the VHDX is made of - and
       # compares it against tests/closure-budget.nix.  No KVM needed: the disk
       # image is not built here, only the system that goes into it.
       - name: Closure budget
         run: tools/closure.sh check
+
+      # The appliance kernel is the one expensive thing in that build - about
+      # 26 minutes on a runner - and 25 MiB to download.  The toplevel and the
+      # image take its out and modules outputs, and neither refers to anything
+      # else; dev would drag 2.6 GiB of toolchain along, and nothing needs it.
+      # Skipped wherever the token is not there, forks included.
+      - name: Push the appliance kernel to the binary cache
+        if: env.CACHIX_AUTH_TOKEN != ''
+        run: |
+          kernel='.#nixosConfigurations.spotibox.config.boot.kernelPackages.kernel'
+          cachix push physshell \
+            "$(nix eval --raw "$kernel.outPath")" \
+            "$(nix eval --raw "$kernel.modules.outPath")"
 
   powershell:
     name: controller lint + unit checks (${{ matrix.shell }})
