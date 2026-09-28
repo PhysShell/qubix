@@ -6,11 +6,14 @@
 #   tools/closure.sh why NEEDLE      why the production image still contains NEEDLE
 #   tools/closure.sh roots [N]       system packages ranked by what they alone cost
 #   tools/closure.sh check           CI gate: budget, and no nixpkgs channel in the image
-#   tools/closure.sh baseline        record today's production size as the budget
+#   tools/closure.sh baseline [--allow-dirty]
+#                                    record the production size as the budget,
+#                                    measured in a fresh, sandboxed store
 #
 # Everything measures `system.build.toplevel`, not the VHDX.  An image is that
-# closure plus a filesystem around it, toplevel builds without KVM, and the
-# numbers are stable enough to compare across machines.
+# closure plus a filesystem around it, toplevel builds without KVM, and every
+# build here is sandboxed, so the numbers compare across machines - see
+# tools/lib/measure.sh for what it took to make that true.
 #
 # Nothing here deletes anything.  A store path ships because something in the
 # system still refers to it, so the only way to make an image smaller is to
@@ -18,6 +21,8 @@
 # inside the guest would be shouting at the wrong end of the pipeline.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=tools/lib/measure.sh
+. tools/lib/measure.sh
 
 # Matches the single `system` in flake.nix.
 system=x86_64-linux
@@ -34,12 +39,12 @@ headroom_percent=2
 die() { echo "closure.sh: $*" >&2; exit 1; }
 
 build() {
-  nix build --no-link --print-out-paths ".#$1"
+  nix_build --no-link --print-out-paths ".#$1"
 }
 
 # Total size of a store path's closure, in bytes.
 closure_bytes() {
-  nix path-info -S "$1" | awk '{ print $2 }'
+  nix_path_info -S "$1" | awk '{ print $2 }'
 }
 
 # Binary units, spelled out: `nix path-info -h` rounds harder than is useful
@@ -50,7 +55,7 @@ human() {
 
 # Store paths of one closure, largest own (NAR) size first: "bytes<TAB>path".
 by_size() {
-  nix path-info -rs "$1" | awk '{ print $2 "\t" $1 }' | sort -nr
+  nix_path_info -rs "$1" | awk '{ print $2 "\t" $1 }' | sort -nr
 }
 
 cmd_report() {
@@ -244,7 +249,19 @@ cmd_check() {
 }
 
 cmd_baseline() {
-  local out total max version
+  local allow_dirty='' rev out total max version
+  case "${1:-}" in
+    '') ;;
+    --allow-dirty) allow_dirty=1 ;;
+    *) die "usage: tools/closure.sh baseline [--allow-dirty]" ;;
+  esac
+  rev=$(measure_rev)
+  [ -n "$allow_dirty" ] || refuse_unless_commit "$rev" "$budget_file"
+
+  # The number CI holds every pull request to has to be the one CI gets.
+  measure_in_fresh_store
+  require_sandbox
+
   out=$(build "$prod_attr")
   total=$(closure_bytes "$out")
   max=$(( total + total * headroom_percent / 100 ))
@@ -258,7 +275,9 @@ cmd_baseline() {
 # environment cannot reappear in the image through an innocent-looking
 # \`environment.systemPackages\` line without somebody re-recording it here.
 #
-# Re-record after any intentional growth, and after a nixpkgs bump.
+# Re-record after any intentional growth, and after a nixpkgs bump.  The
+# baseline measures in a fresh store with every build sandboxed, and only from
+# a commit, so the number here is the one CI gets.
 {
   spotibox = {
     # \`nix path-info -S\` of
@@ -270,6 +289,7 @@ cmd_baseline() {
 
     # What the numbers above were measured against.
     nixosVersion = "$version";
+    rev = "$rev";
   };
 }
 EOF
