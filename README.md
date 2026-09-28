@@ -805,9 +805,9 @@ matters more than its 7 MiB suggests: every driver cut there comes straight
 out of the `bzImage`, which is loaded into RAM on every boot.
 
 Stage two removes families rather than drivers: sound, every radio, every
-physical GPU, capture hardware and infrared, FireWire, Thunderbolt,
-InfiniBand, the parallel port, the floppy controller, every physical NIC
-driver, KVM, four filesystems with no mount point here, and Android's binder.
+physical GPU, capture hardware and infrared, FireWire, InfiniBand, the
+parallel port, the floppy controller, every physical NIC driver, KVM, four
+filesystems with no mount point here, and Android's binder.
 Each one is a line in `tests/kernel-contract.nix` with the argument for it, so
 the list stays something a person can read rather than a second copy of
 Kconfig. Sound is the one that looks wrong: this appliance plays music, but
@@ -850,6 +850,21 @@ shape of this work rather than accidents:
   `ignoreConfigErrors` a wrong name is not an error - the option simply does
   nothing. The contract test is what noticed, which is the entire argument for
   asserting the output rather than trusting the input.
+
+That last one only got noticed because `SCSI_VIRTIO` happened to be in the
+contract. `ignoreConfigErrors` is needed - nixpkgs' common-config asks for
+things stage two removed - but it cannot tell common-config's requests from
+`profiles/kernel/hyperv.nix`'s own, so the contract now holds the file itself
+to two rules. Every symbol it names has to exist in this kernel and land as
+asked. And every symbol it switches on has to be either required - so the
+check survives the line being deleted - or listed as `extra` with the reason
+it is still asked for; seven are, from the dm-verity experiment's
+device-mapper to QEMU's IDE controller, and each is a candidate for the next
+kernel change. On its first run the rule found `THUNDERBOLT = no`, a line that
+has done nothing since the symbol was renamed `USB4`. USB4 is off anyway, by
+default rather than by request, and the one-word fix rebuilds the kernel, so
+it waits: the contract lists the line as knowingly inert, and checks `USB4`
+itself instead.
 
 ### The Last Python Was A Diagnostic
 
@@ -1250,6 +1265,11 @@ the experiment in a separate branch is what makes saying no cheap.
   rather than through a visible picker, so the likely outcome is a patch to
   carry rather than an option to set. Second, and only if the first one went
   well.
+- The next kernel change, whenever it comes, is also the time to spend the
+  rebuild on `THUNDERBOLT = no` becoming `USB4 = no` and on the seven `extra`
+  requests in `tests/kernel-contract.nix`, device-mapper included unless the
+  dm-verity image has landed by then. Each of those changes the kernel the
+  Hyper-V baseline was accepted with, which is why none of them is in it.
 
 - Move the image to `image.repart` with a dm-verity-protected squashfs store
   (see *Why The Image Is ext4*). It halves what the VM occupies on the host,
