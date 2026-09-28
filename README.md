@@ -504,6 +504,8 @@ tools/closure.sh why cups                                    # who is still hold
 tools/closure.sh check                                       # the CI closure gate, locally
 tools/cold-boot.sh                                           # boots the real VHDX through OVMF, ESP and all
 tools/telemetry.sh                                           # image-level sizes against tests/image-budget.nix
+tools/closure.sh baseline                                    # re-record the closure budget: a commit, a fresh store, sandboxed
+tools/telemetry.sh --record                                  # re-record the image budget the same way
 pwsh ./tests/qubixctl.Tests.ps1                              # controller unit checks
 pwsh ./tests/qubix-acceptance.Tests.ps1                      # acceptance harness, against stand-in Hyper-V cmdlets
 ```
@@ -698,6 +700,20 @@ channel unless told otherwise, and the upstream Hyper-V module never tells it:
 make-disk-image itself with `copyChannel = false` for production images, taking
 another ~186 MiB of Nix expressions out of the VHDX - a second copy of the tree
 the registry was already pinning. `tools/closure.sh check` fails if it returns.
+
+Both budgets - this one and the image sizes in `tests/image-budget.nix` - are
+recorded from a commit, in a store created empty for the purpose, with every
+build sandboxed. The first recordings were not, and came out 59,024 bytes under
+what every CI run measured for the same derivation. On a builder with the
+sandbox off, nixpkgs' font cache derivation wrote the fonts' cache into the
+builder's own `/var/cache/fontconfig` and left the image an empty one, and
+`hwdb.bin`, which records the full path of every file it was compiled from,
+spelled out a random build directory 33 times instead of the sandbox's
+`/build`. Switching the sandbox on afterwards
+changes nothing, because Nix does not rebuild an output it already has - hence
+the fresh store. `tools/lib/measure.sh` holds the rules, and
+`tools/lib/sandbox-probe.nix` proves them from inside a build before anything
+is recorded.
 
 ### The X Server Nobody Configures
 
@@ -1257,6 +1273,8 @@ tools/
   closure.sh               closure census and budget (report/diff/why/check/baseline)
   cold-boot.sh             boots a built VHDX through OVMF firmware, checks RDP
   telemetry.sh             image-level size telemetry and budget, run at release
+  lib/measure.sh           sandboxed builds and fresh stores, for closure.sh and telemetry.sh
+  lib/sandbox-probe.nix    the build that proves the sandbox before a budget is recorded
   qubix-acceptance.ps1     Hyper-V acceptance: Dynamic Memory, shutdown, KVP
   qubix-acceptance.cmd     elevating wrapper for it
 tests/

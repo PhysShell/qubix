@@ -2,9 +2,14 @@
 # Image-level size telemetry, recorded per release.
 #
 #   tools/telemetry.sh                          measure, compare against the recorded budget
-#   tools/telemetry.sh --record                 measure and write tests/image-budget.nix
+#   tools/telemetry.sh --record                 measure in a fresh, sandboxed store and
+#                                               write tests/image-budget.nix
 #   tools/telemetry.sh --record --allow-dirty   the same from uncommitted work, marked -dirty
 #   tools/telemetry.sh --json                   just the JSON, for a release asset
+#
+# Every build here is sandboxed, and a recording starts from an empty store:
+# tools/lib/measure.sh says why a number taken any other way is the machine's
+# rather than the commit's.
 #
 # tools/closure.sh gates `system.build.toplevel`, which is cheap enough to run
 # on every pull request.  This gates the things only a finished image can tell
@@ -17,6 +22,8 @@
 # without somebody re-recording it here and explaining why in the diff.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=tools/lib/measure.sh
+. tools/lib/measure.sh
 
 budget_file=tests/image-budget.nix
 mode=check
@@ -35,41 +42,33 @@ if [ -n "$allow_dirty" ] && [ "$mode" != record ]; then
 fi
 
 # Headroom recorded on top of a fresh measurement, in percent.  Larger than
-# the closure gate's 2%: gzip output moves with the compressor's mood and a
-# dynamic VHDX allocates in extents, so image numbers are noisier than a
-# closure size, which is a sum of exact NAR sizes.
+# the closure gate's 2%, because the closure numbers repeat to the byte and
+# the image numbers do not: the images are not bit-reproducible.  qemu-img
+# writes fresh random GUIDs into every VHDX header and mkfs.ext4 picks a
+# random UUID, so two sandboxed recordings of one commit agreed on every
+# closure figure and on the VHDX's apparent size, and differed by 61,440
+# bytes of its allocation, 6,894 of the compressed image and 87 of the
+# compressed home seed.  An image figure here is one sample, not a constant.
 headroom_percent=5
 
 say() { [ "$mode" = json ] || echo "$@" >&2; }
 
-# The commit this is measured on, marked -dirty when the tree differs from it:
-# a measurement of uncommitted work names its parent commit and would
-# otherwise claim a provenance it does not have.
-rev=$(git rev-parse HEAD 2>/dev/null || echo unknown)
-git diff --quiet HEAD 2>/dev/null || rev="$rev-dirty"
+rev=$(measure_rev)
 
-# A budget answers "measured on exactly what?", and a -dirty rev answers "on
-# roughly this".  So recording one from a tree that is not a commit is
-# refused, before the builds rather than after them; --allow-dirty exists for
-# experiments, and its rev still says -dirty.
-if [ "$mode" = record ] && [ -z "$allow_dirty" ]; then
-  case "$rev" in
-    *-dirty|unknown)
-      {
-        echo "telemetry.sh: refusing to record $budget_file from a tree that is not a commit ($rev)."
-        echo "Commit first, so the budget names the exact source it was measured on."
-        echo "(--allow-dirty records anyway, and the rev says so.)"
-      } >&2
-      exit 1 ;;
-  esac
+if [ "$mode" = record ]; then
+  [ -n "$allow_dirty" ] || refuse_unless_commit "$rev" "$budget_file"
+  # The release job's own store is fresh and sandboxed already; a machine
+  # recording a budget has to be made so.
+  measure_in_fresh_store
+  require_sandbox
 fi
 
 say "building toplevel, image and release bundle..."
-toplevel=$(nix build --no-link --print-out-paths .#spotibox-toplevel)
-image=$(nix build --no-link --print-out-paths .#spotibox-vhdx)
-release=$(nix build --no-link --print-out-paths .#spotibox-release)
+toplevel=$(nix_build --no-link --print-out-paths .#spotibox-toplevel)
+image=$(nix_build --no-link --print-out-paths .#spotibox-vhdx)
+release=$(nix_build --no-link --print-out-paths .#spotibox-release)
 
-vhdx=$(find -L "$image" -name '*.vhdx' -print -quit)
+vhdx=$(find -L "$(host_path "$image")" -name '*.vhdx' -print -quit)
 test -n "$vhdx" || { echo "no .vhdx in $image" >&2; exit 1; }
 
 # Own NAR size of the closure paths whose *name* matches, with the number of
@@ -86,7 +85,7 @@ test -n "$vhdx" || { echo "no .vhdx in $image" >&2; exit 1; }
 # the release and prints what it found.
 nar_of() {
   local pat="$1" want="$2" found
-  found=$(nix path-info -rs "$toplevel" |
+  found=$(nix_path_info -rs "$toplevel" |
     awk -v pat="$pat" '
       { name = substr($1, length("/nix/store/") + 34) }
       name ~ pat { print $1 "\t" $2 }')
@@ -106,8 +105,8 @@ nar_of() {
 
 version=$(nix eval --raw .#nixosConfigurations.spotibox.config.system.nixos.label)
 
-closure_bytes=$(nix path-info -S "$toplevel" | awk '{ print $2 }')
-closure_paths=$(nix path-info -r "$toplevel" | wc -l)
+closure_bytes=$(nix_path_info -S "$toplevel" | awk '{ print $2 }')
+closure_paths=$(nix_path_info -r "$toplevel" | wc -l)
 # The counts are part of the contract.  Three trees of kernel modules ship,
 # and the count is here so that nobody has to remember why:
 #
@@ -134,8 +133,8 @@ initrd_bytes=$(nar_of '^initrd-linux-' 1)
 # means the image is laid out differently, not that a host pays more or less.
 vhdx_apparent=$(stat -L -c %s "$vhdx")
 vhdx_builder_allocated=$(( $(stat -L -c %b "$vhdx") * $(stat -L -c %B "$vhdx") ))
-release_bytes=$(stat -L -c %s "$release/spotibox.vhdx.gz")
-home_release_bytes=$(stat -L -c %s "$release/spotibox-home.vhdx.gz")
+release_bytes=$(stat -L -c %s "$(host_path "$release")/spotibox.vhdx.gz")
+home_release_bytes=$(stat -L -c %s "$(host_path "$release")/spotibox-home.vhdx.gz")
 
 metrics=(closure_bytes closure_paths kernel_bytes modules_bytes initrd_bytes
          vhdx_apparent vhdx_builder_allocated release_bytes home_release_bytes)
@@ -183,8 +182,10 @@ if [ "$mode" = record ]; then
     echo "# what the VHDX costs the host - its apparent size, since qubixctl"
     echo "# writes it out in full - and what the release asset costs to download."
     echo "# vhdxBuilderAllocatedBytes is the builder's sparse view of the same"
-    echo "# file, not a host cost.  Re-record deliberately, from a commit, and say"
-    echo "# why in the commit that follows."
+    echo "# file, not a host cost.  Re-record deliberately, and say why in the"
+    echo "# commit that follows.  --record measures only from a commit, in a fresh"
+    echo "# store with every build sandboxed: the numbers belong to the commit,"
+    echo "# not to the machine that took them."
     echo "{"
     echo "  spotibox = {"
     echo "    # What the numbers below were measured against."
