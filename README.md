@@ -342,7 +342,7 @@ generation 2 at configuration version 12.0.
 
 | Check | Took | What it showed |
 | --- | --- | --- |
-| cold boot #1 | 44.9 s | power-on to an X.224 reply |
+| cold boot #1 | 44.9 s | power-on to an X.224 reply; Hyper-V logs the OS as loaded at +5 s (event 18601), so about 40 s are the guest's own boot |
 | KVP expected IPv4 | 0.2 s | the static address, as soon as xrdp answered |
 | shutdown service | 0.1 s | enabled, OK |
 | memory demand | 9.1 s | 450 MiB; the first report came about 54 s after power-on, because `hv_balloon` keeps quiet for its first 45 |
@@ -351,7 +351,7 @@ generation 2 at configuration version 12.0.
 | cold boot #2 | 44.3 s | back on the same address |
 | KVP after reboot | 0.2 s | the same address |
 
-Two things the verdict column does not say:
+Three things the verdict column does not say:
 
 - **The hot-added memory came online.** Demand went from 450 to 491 MiB while
   408 MiB were hot-added. `hv_balloon` reports hot-added pages that are still
@@ -364,6 +364,18 @@ Two things the verdict column does not say:
   only to production checkpoints and host-level backups, and qubixctl creates
   the VM with checkpoints disabled. The Guest Service Interface is disabled,
   as Hyper-V ships it, and its daemon is gone as well.
+- **The pre-run stop was a clean shutdown, not a power cut.** Next to the
+  3-6 s of the checked shutdown, the file's `Stop-VM -Force took 0.7s` looked
+  like one. Hyper-V's own log says otherwise: event 18504 at 09:59:40, "shut
+  down using the shutdown integration component, Force = true", and nothing
+  at all in the 33 minutes the VM had idled before that - no guest crash, no
+  lost heartbeat. The guest handles forced and polite requests the same way
+  (`hv_utils` hands both to `orderly_poweroff()`, which runs the
+  `systemd poweroff` NixOS sets as `kernel.poweroff_cmd`), so the difference
+  is the guest's state, not the path. Most likely the checked shutdown lands
+  a minute after boot and straight after the memory test, with fresh writes
+  still to flush and the balloon starting to take back 400 MiB, while a VM
+  that has idled for half an hour has nothing left to do.
 
 These are the numbers later runs get compared against. A cold boot that
 drifts towards a minute, or a hot-add that no longer shows up within a few
