@@ -140,18 +140,45 @@
         };
       };
 
+    # A UUID that is a function of its name: the name's SHA-256 cut to the
+    # 8-4-4-4-12 shape, with RFC 9562's version (8, custom) and variant bits
+    # set.  The same name gives the same UUID on every machine, every build.
+    stableUuid = name:
+      let
+        h = builtins.hashString "sha256" name;
+        at = start: len: builtins.substring start len h;
+        # The variant is the top two bits of octet 8, binary 10.
+        variant = builtins.elemAt [ "8" "9" "a" "b" ]
+          (lib.mod (lib.fromHexString (at 16 1)) 4);
+      in "${at 0 8}-${at 8 4}-8${at 13 3}-${variant}${at 17 3}-${at 20 12}";
+
     # Pre-formatted, labelled, empty ext4 disk for /home as a dynamic VHDX.
     # The guest mounts it by label (profiles/storage/persistent-home.nix), the
     # host copies it next to the VM once and never touches it again.
+    #
+    # The filesystem is the same bytes on every build.  mke2fs draws the UUID
+    # and the directory hash seed at random unless told otherwise, and ext4's
+    # metadata checksums are seeded from the UUID, so a random one does not
+    # change 16 bytes but every checksummed structure: two builds of one
+    # commit differed in some 6,300 bytes across 551 blocks.  Both are derived from
+    # what the disk is instead - the machine and the label - and
+    # SOURCE_DATE_EPOCH fixes the timestamps mke2fs writes, which stdenv
+    # happens to set as well; tests/home-seed.nix pins the UUID.  The VHDX
+    # around it is not reproducible: qemu-img writes fresh GUIDs into its
+    # headers and metadata, and a sequence number and log entries of its own.
     mkHomeSeed = cfg:
-      let hd = cfg.qubix.homeDisk;
+      let
+        hd = cfg.qubix.homeDisk;
+        fsUuid = stableUuid "qubix-home-seed:${cfg.networking.hostName}:${hd.label}";
       in pkgs.runCommand "qubix-home-${cfg.networking.hostName}.vhdx" {
         nativeBuildInputs = [ pkgs.e2fsprogs pkgs.qemu-utils ];
+        passthru = { inherit fsUuid; };
       } ''
         raw="$TMPDIR/home.raw"
         truncate -s ${toString hd.sizeMiB}M "$raw"
-        mkfs.ext4 -q -F -L ${lib.escapeShellArg hd.label} -m 0 \
-          -E lazy_itable_init=1,lazy_journal_init=1 "$raw"
+        SOURCE_DATE_EPOCH=1 mkfs.ext4 -q -F -L ${lib.escapeShellArg hd.label} -m 0 \
+          -U ${fsUuid} \
+          -E lazy_itable_init=1,lazy_journal_init=1,hash_seed=${fsUuid} "$raw"
         qemu-img convert -f raw -O vhdx -o subformat=dynamic "$raw" "$out"
       '';
 
@@ -233,6 +260,12 @@
           inherit pkgs lib;
           prod = spotibox.config;
           debug = spotiboxDebug.config;
+        };
+
+      spotibox-home-seed-identity =
+        import ./tests/home-seed.nix {
+          inherit pkgs lib;
+          seed = self.packages.${system}.spotibox-home-vhdx;
         };
     };
   };

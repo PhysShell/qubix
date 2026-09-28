@@ -1,0 +1,124 @@
+Image reproducibility census, 2026-09-28
+
+tools/repro-census.sh, run twice in this container: first on main as it was
+(66e8625, the census tools copied in, untracked), then on 6c7c098, which
+derives the home seed's filesystem identity.  Each run builds every image in
+a fresh, sandboxed store, rebuilds it from the same inputs with --rebuild,
+reads both VHDX files back to raw with qemu-img, and has
+tools/lib/image-diff.py name the structure each differing byte sits in.
+The output below is verbatim; exit=1 means some layer did not reproduce.
+
+How to read it:
+  - "payload, in N blocks" is VHDX payload blocks, whose contents are the raw
+    disk: the raw comparison below it says where in the disk they differ.
+  - "unaccounted" is bytes of the second VHDX past the end of the first, or
+    in space the first one's BAT does not reference: the two files are not
+    the same size, because the second build allocated blocks elsewhere.
+  - The system image's figures move from run to run - how much of the root
+    filesystem lands elsewhere is what differs between builds - while the
+    share of its non-zero blocks whose content both builds have stays at
+    94.2%: the data is the same, its placement and the metadata over it are
+    not.
+  - The home seed's raw comparison after the change is 0 bytes: the ext4
+    filesystem is identical, and what is left is qemu-img's container.
+
+---------------------------------------------------------------- before (main)
+census of 66e86255c6089d97445dd1f848a9fc8282469e74, 2026-09-28
+== spotibox-home-vhdx
+  sha256 57935c809d377d99c1a0118d0a796144fb637c01c72e72f26b6346657b15b2a3
+  sha256 6634044929cf4a9f494ef57ee762460e7abe981fb9f4c729c8dec92ac04307f7
+  vhdx (343932928 bytes): 6776 bytes differ in 2490 runs
+            6286  payload, in 13 blocks
+             394  log
+              16  metadata: page 83 data
+              16  header 2: file write GUID
+              16  header 2: data write GUID
+              16  header 1: file write GUID
+              16  header 1: data write GUID
+               4  header 2: sequence number
+               4  header 2: checksum
+               4  header 1: sequence number
+               4  header 1: checksum
+  raw (17179869184 bytes): 6286 bytes differ in 2439 runs
+            6247  filesystem, ext4 data in 551 blocks
+              16  filesystem: ext4 superblock s_hash_seed
+              15  filesystem: ext4 superblock s_uuid
+               4  filesystem: ext4 superblock s_checksum_seed
+               4  filesystem: ext4 superblock s_checksum
+    filesystem, ext4: 1045 of its 1597 non-zero blocks (65.4%) hold content the other build has too, at whatever offset
+== spotibox-vhdx
+  sha256 c6ee18b4fafcdf402895dc2be82319a7c30d92b254db7489a1943a71f05cbba4
+  sha256 a4ba6382a7f418fb70026b1ee95581b7edbb81758e96386cd104b519155b4a99
+  vhdx (sizes differ): 1191799814 bytes differ in 58023035 runs
+      1191790686  payload, in 101 blocks
+            8797  log
+             235  BAT
+              16  metadata: page 83 data
+              16  header 2: file write GUID
+              16  header 2: data write GUID
+              16  header 1: file write GUID
+              16  header 1: data write GUID
+               4  header 2: sequence number
+               4  header 2: checksum
+               4  header 1: sequence number
+               4  header 1: checksum
+  raw (8589934592 bytes): 1440440738 bytes differ in 97321544 runs
+      1440440526  partition 2 (primary), ext4 data in 482530 blocks
+             184  partition 1 (ESP), FAT data in 10 blocks
+              16  partition 2 (primary): ext4 superblock s_hash_seed
+               4  partition 2 (primary): ext4 superblock s_checksum_seed
+               4  partition 2 (primary): ext4 superblock s_checksum
+               2  partition 2 (primary): ext4 superblock s_mtime
+               2  partition 2 (primary): ext4 superblock s_kbytes_written
+    partition 2 (primary), ext4: 315195 of its 334516 non-zero blocks (94.2%) hold content the other build has too, at whatever offset
+== spotibox-release
+  gzip is reproducible: rebuilt from the same two images, identical
+exit=1 after 953s
+
+------------------------------------------------ after (home seed identity)
+census of 6c7c09809c836446c8dc0240286d52dc4afaa161, 2026-09-28
+== spotibox-home-vhdx
+  sha256 02c6d1095f8a42ae97c6ee87e8f7596503897bfb8289fa7af22aba7a36fa0912
+  sha256 f6fc4deb63143645199af176dae115d620393be8bf70517e641a33553cf4e820
+  vhdx (343932928 bytes): 492 bytes differ in 49 runs
+             398  log
+              16  metadata: page 83 data
+              16  header 2: data write GUID
+              16  header 1: data write GUID
+              15  header 2: file write GUID
+              15  header 1: file write GUID
+               4  header 2: sequence number
+               4  header 2: checksum
+               4  header 1: sequence number
+               4  header 1: checksum
+  raw (17179869184 bytes): 0 bytes differ in 0 runs
+== spotibox-vhdx
+  sha256 fdff87070631f675318386323b62f0022ebe42b2880a6d19303ba64396e5a708
+  sha256 ee5c7da4c57cbb303b169363410134899ca94de16833366b3e9644c8d560824e
+  vhdx (sizes differ): 1078736947 bytes differ in 50360684 runs
+      1078728990  payload, in 97 blocks
+            6646  log
+            1164  unaccounted
+              52  BAT
+              16  metadata: page 83 data
+              16  header 2: file write GUID
+              16  header 2: data write GUID
+              16  header 1: file write GUID
+              15  header 1: data write GUID
+               4  header 2: sequence number
+               4  header 2: checksum
+               4  header 1: sequence number
+               4  header 1: checksum
+  raw (8589934592 bytes): 1081401154 bytes differ in 44470198 runs
+      1081400945  partition 2 (primary), ext4 data in 314210 blocks
+             181  partition 1 (ESP), FAT data in 10 blocks
+              16  partition 2 (primary): ext4 superblock s_hash_seed
+               4  partition 2 (primary): ext4 superblock s_checksum_seed
+               4  partition 2 (primary): ext4 superblock s_checksum
+               2  partition 2 (primary): ext4 superblock s_kbytes_written
+               1  partition 2 (primary): ext4 superblock, other
+               1  partition 2 (primary): ext4 superblock s_mtime
+    partition 2 (primary), ext4: 315188 of its 334533 non-zero blocks (94.2%) hold content the other build has too, at whatever offset
+== spotibox-release
+  gzip is reproducible: rebuilt from the same two images, identical
+exit=1 after 753s
