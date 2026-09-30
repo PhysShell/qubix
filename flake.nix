@@ -255,6 +255,11 @@
           inherit pkgs;
         };
 
+      spotibox-xrdp-audio =
+        import ./tests/xrdp-audio.nix {
+          inherit pkgs;
+        };
+
       spotibox-kernel-contract =
         import ./tests/kernel-contract.nix {
           inherit pkgs lib;

@@ -276,6 +276,21 @@ lib.mkIf (config.qubix.mode == "prod") {
   xdg.icons.enable = lib.mkForce false;
   xdg.sounds.enable = lib.mkForce false;
 
+  # 34 MiB for a bridge nothing crosses.  The PulseAudio module writes
+  # /etc/alsa/conf.d/99-pulseaudio.conf, which makes pcm.default and
+  # ctl.default alsa-plugins' `pulse` types so that programs written against
+  # ALSA play into PulseAudio.  That file is the image's only reference to
+  # alsa-plugins, and alsa-plugins its only reference to ffmpeg 8 - linked by
+  # the a52 encoder and lavrate resampler, which nothing here configures.
+  #
+  # The kernel has no sound support, so there is no ALSA device to fall back
+  # to; xrdp's sink is a PulseAudio module; and Spotify, the one program here
+  # with an ALSA driver, tries PulseAudio first and only turns to ALSA when
+  # PulseAudio cannot be reached - which a bridge into PulseAudio cannot fix.
+  # tests/xrdp-audio.nix plays over RDP, and again after a reconnect.  The
+  # debug image keeps the file, with the ALSA kernel and alsa-utils it keeps.
+  environment.etc."alsa/conf.d/99-pulseaudio.conf".enable = lib.mkForce false;
+
   # ~60 MiB: the default set is DejaVu, FreeFont, Gyre, Liberation, Unifont and
   # Noto Color Emoji.  This appliance renders Latin, Cyrillic and the emoji
   # people put in playlist names.  DejaVu covers the first two - it is also
@@ -369,6 +384,7 @@ lib.mkIf (config.qubix.mode == "prod") {
     "zenity"
     "pavucontrol"
     "xterm"
+    "alsa-plugins"
   ];
 
   # environment.corePackages calls itself "core packages for a normal

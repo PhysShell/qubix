@@ -14,16 +14,16 @@
   spotibox = {
     # What the numbers below were measured against.
     nixosVersion = "hyperv-25.11.20260501.26ef669";
-    rev = "7cf3e813d742e41a284560b83dcc7858ceba7d8d";
+    rev = "345c420de288eccbdf85d2614ad0e029bc28437f";
 
-    closureBytes = { measured = 1222866800; max = 1284010140; };
-    closurePaths = { measured = 579; max = 607; };
+    closureBytes = { measured = 1187190640; max = 1246550172; };
+    closurePaths = { measured = 572; max = 600; };
     kernelBytes = { measured = 24995768; max = 26245556; };
     modulesBytes = { measured = 1791416; max = 1880986; };
     initrdBytes = { measured = 23092240; max = 24246852; };
-    vhdxApparentBytes = { measured = 1719664640; max = 1805647872; };
-    vhdxBuilderAllocatedBytes = { measured = 1410596864; max = 1481126707; };
-    releaseBytes = { measured = 520302296; max = 546317410; };
-    homeReleaseBytes = { measured = 420843; max = 441885; };
+    vhdxApparentBytes = { measured = 1686110208; max = 1770415718; };
+    vhdxBuilderAllocatedBytes = { measured = 1374699520; max = 1443434496; };
+    releaseBytes = { measured = 505700521; max = 530985547; };
+    homeReleaseBytes = { measured = 420606; max = 441636; };
   };
 }
