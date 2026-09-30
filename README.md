@@ -1143,8 +1143,11 @@ client connects to the appliance, the session's PulseAudio plays through xrdp's
 sink, and the client has to receive PCM; then it disconnects, reconnects and
 has to receive it again. It passes with the bridge and without it, and the
 image without it cold-boots under OVMF to an RDP answer (`tools/cold-boot.sh`).
-What no VM test here can do is log in to Spotify, so the last word is a track
-playing on real Hyper-V, through a reconnect.
+What no VM test here can do is log in to Spotify, so the last word was a track
+playing on real Hyper-V, through reconnects. It did, from the image built at
+3d6793c (`wsl:spotibox-baseline-2026-09-28-12-g3d6793c`, store path
+`7z7pn736…` - the same derivation the cold boot above booted): sound through
+mstsc, and sound again after each of several reconnects.
 
 The debug image keeps the file, next to the stock kernel with ALSA and the
 alsa-utils it also keeps.
