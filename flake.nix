@@ -122,6 +122,16 @@
     spotibox      = evalMachine [ ./machines/spotibox.nix ];
     spotiboxDebug = evalMachine [ ./machines/spotibox-debug.nix ];
 
+    # scanbox is a QEMU/KVM batch VM, not a Hyper-V appliance, so it is
+    # evaluated without the Hyper-V image modules (see machines/scanbox.nix).
+    scanbox = lib.nixosSystem {
+      inherit system pkgs;
+      modules = [
+        "${nixpkgs}/nixos/modules/virtualisation/qemu-vm.nix"
+        ./machines/scanbox.nix
+      ];
+    };
+
     qubixManifest = {
       schemaVersion = 2;
       machines = {
@@ -204,6 +214,7 @@
     nixosConfigurations = {
       spotibox       = spotibox;
       spotibox-debug = spotiboxDebug;
+      scanbox        = scanbox;
     };
 
     packages.${system} = {
@@ -233,6 +244,9 @@
       # build" without waiting for an image.
       spotibox-toplevel       = spotibox.config.system.build.toplevel;
       spotibox-debug-toplevel = spotiboxDebug.config.system.build.toplevel;
+
+      # Run with tools/scanbox-run.sh <job-dir> <out-dir>.
+      scanbox-vm = scanbox.config.system.build.vm;
 
       default = self.packages.${system}.spotibox-vhdx;
     };
